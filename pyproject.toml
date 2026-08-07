@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wechatauto-replica"
-version = "1.0.0"
+version = "1.0.1"
 description = "Windows版本微信客户端（非网页版）自动化，复刻版，支持当前微信4.x客户端"
 readme = "README.md"
 requires-python = ">=3.9"
