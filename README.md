@@ -3,11 +3,32 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.0.1
+> 当前版本：1.0.2
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
 > 布局，其它 4.x 小版本可能需校准 `guia.py` 布局常量）。
+
+---
+
+## 版本记录
+
+### v1.0.2（2026-08-08）
+
+- **表情消息支持**：新增 `EmojiMessage` 消息类型（`type='emotion'`），
+  "动画表情"不再被归为 `OtherMessage`，并按收发方向提供
+  `FriendEmojiMessage` / `SelfEmojiMessage`。微信 4.x 表情消息在本地数据库中的
+  content 为加密数据，无法直接还原成图片，因此新增 `EmojiMessage.capture()`：
+  采用「打开会话 → 滚动到底 → 截取消息区 → 连通域分析自动裁剪最后一条气泡」
+  的屏幕截图方案，返回图片路径，可直接供 AI 视觉识别使用
+  （示例见 `demo_emoji_capture.py`）。
+- **监听器并发工作线程**：`Listener` 回调移到独立工作线程执行，每个被监听
+  会话对应一条**串行**工作线程——同一会话内消息按序处理、不同会话间并行；
+  轮询线程只负责读取数据库并分派任务，不再被慢回调（AI 调用 / 图片识别等）
+  阻塞，`stop()` 优雅关闭所有工作线程。
+- **数据库消息兼容增强**：`_db_row_to_message` 支持 bytes 类型 content
+  （自动解码还原文本）、`local_type` 缺失时自动推导消息类型，
+  `_extract_group_sender` 兼容 bytes 内容。
 
 ---
 
@@ -17,6 +38,7 @@
 | ---- | ---- | -------- |
 | 读取消息 | ✅ 已完成并验证 | 本地数据库解密（`wechatauto/db.py`） |
 | 消息监听（轮询） | ✅ 已完成并验证 | `Listener` + `get_new_messages` 增量回调 |
+| 表情消息识别与截图 | ✅ 新增（v1.0.2） | `EmojiMessage` + `capture()`（屏幕截图自动裁剪） |
 | WAL 增量合并 | ✅ 已修复并验证 | 帧盐校验合并 `-wal`（见 §2.4） |
 | 历史消息全量导出 | ✅ 已完成并验证 | `export_history`（JSON / SQLite） |
 | 媒体下载（图片/语音/文件） | ✅ 已完成并验证 | `wechatauto/media.py`（图片 V2 解密） |
@@ -185,6 +207,10 @@ lst.start()
 lst.stop()
 ```
 
+- 回调在**独立工作线程**中执行（v1.0.2）：每个被监听会话对应一条串行
+  工作线程，同一会话内消息按序处理、不同会话间并行；轮询线程只负责读取
+  数据库并分派任务，不会被慢回调（AI 调用 / 图片识别等）阻塞。
+
 ### 3.7 历史导出
 
 ```python
@@ -202,6 +228,26 @@ for a in list_accounts():
     print(a["account"], a["wxid"])
 db2 = WeChatDB(account="wxid_xxx_abcd")       # 显式指定账号（缓存按账号隔离）
 ```
+
+### 3.9 表情消息与截图
+
+微信 4.x 的"动画表情"消息在本地数据库中 content 为加密数据，无法直接还原成
+图片。v1.0.2 起监听回调中的表情消息为独立的 `EmojiMessage` 类型
+（`type='emotion'`，`FriendEmojiMessage` / `SelfEmojiMessage` 按收发方向区分），
+并支持对屏幕上的表情气泡自动截图：
+
+```python
+# 在 Listener 回调内，把消息 dict 转成消息对象后再截图：
+def on_msg(msg, listener):
+    if msg["type"] == "动画表情":
+        from wechatauto.wx import _db_row_to_message
+        m = _db_row_to_message(msg, chat)   # chat: 当前会话
+        path = m.capture()                  # 返回 PNG 路径，供 AI 视觉识别
+```
+
+`capture(save_dir=None)` 流程：打开会话 → 滚动到底 → 截取消息区 → 连通域分析
+自动裁剪最后一条消息气泡，返回图片路径（失败返回 None）。独立示例：
+`python demo_emoji_capture.py`。
 
 ---
 
@@ -330,6 +376,7 @@ quick_send_file(r'D:\资料\报告.pdf', '文件传输助手')
 ├── demo_guia.py         ★ 坐标+OCR 发送示例
 ├── demo_listen.py       ★ 实时消息监听示例
 ├── demo_reply_at.py     ★ 回复/@ 成员实测示例
+├── demo_emoji_capture.py ★ 表情消息截图示例
 ├── docs/技术文档.md      ★ 完整技术文档（架构/原理/API/扩展）
 └── pyproject.toml
 ```

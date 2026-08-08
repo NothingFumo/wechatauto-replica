@@ -113,8 +113,10 @@ class _DBMessageParent:
         self.msgbox = None
 
 
-def _extract_group_sender(content: str) -> str:
+def _extract_group_sender(content) -> str:
     """群消息内容形如 ``wxid_xxx:\\n正文``，提取发送者 wxid。"""
+    if isinstance(content, bytes):
+        content = content.decode('utf-8', errors='ignore')
     m = re.match(r'^(wxid_[0-9a-zA-Z_]+):\s*\n', content or '')
     return m.group(1) if m else ''
 
@@ -150,7 +152,7 @@ def _pick_msg_class(is_self: bool, mtype: Optional[str], content: str):
             return get('SelfPersonalCardMessage' if is_self else 'FriendPersonalCardMessage')
         return get('SelfOtherMessage' if is_self else 'FriendOtherMessage')
     if mtype == '动画表情':
-        return get('SelfOtherMessage' if is_self else 'FriendOtherMessage')
+        return get('SelfEmojiMessage' if is_self else 'FriendEmojiMessage')
     return get('SelfOtherMessage' if is_self else 'FriendOtherMessage')
 
 
@@ -160,10 +162,15 @@ def _db_row_to_message(row: dict, chat: 'Chat', self_wxid: str = None) -> 'Messa
     direction 判定：``sender_id == 2`` 视为自己（与 guia 发送校验一致），
     也可用 self_wxid 比对兜底。
     """
+    from wechatauto.db import WeChatDB
     from wechatauto.msgs.mattr import SystemMessage
 
-    content = row.get('content') or ''
     mtype = row.get('type')
+    if mtype is None and row.get('local_type') is not None:
+        mtype = WeChatDB._msg_type_name(row.get('local_type'))
+    content = row.get('content') or ''
+    if isinstance(content, bytes):
+        content = WeChatDB._friendly_content(content, mtype)
     sender_id = row.get('sender_id')
     is_self = sender_id == 2 or bool(self_wxid and str(sender_id) == str(self_wxid))
 

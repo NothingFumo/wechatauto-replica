@@ -32,6 +32,16 @@ class SelfImageMessage(SelfMessage, ImageMessage):
         super().__init__(control, parent, additonal_attr)
 
 
+class SelfEmojiMessage(SelfMessage, EmojiMessage):
+    def __init__(
+            self,
+            control: uia.Control,
+            parent: "ChatBox",
+            additonal_attr: Dict[str, Any] = {}
+        ):
+        super().__init__(control, parent, additonal_attr)
+
+
 class SelfFileMessage(SelfMessage, FileMessage):
     def __init__(
             self,

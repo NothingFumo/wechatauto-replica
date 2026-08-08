@@ -110,6 +110,9 @@ def _classify_by_classname(classname: str) -> str:
 
 
 def _classify_by_name_prefix(name: str) -> str:
+    if name.startswith("[动画表情]") or name.startswith("[动画表情"):
+        return "EmojiMessage"
+
     if name.startswith("[链接]"):
         return "LinkMessage"
 

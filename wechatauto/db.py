@@ -24,10 +24,12 @@ import hashlib
 import hmac as hmac_mod
 import json
 import os
+import queue
 import re
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -1052,6 +1054,9 @@ def list_accounts(db_dir: Optional[str] = None) -> List[dict]:
     return out
 
 
+_LISTENER_STOP = object()
+
+
 class Listener:
     """新消息轮询监听器（只读，基于合并了 -wal 的消息库视图）。
 
@@ -1064,6 +1069,10 @@ class Listener:
         listener.stop()
 
     watermark 可持久化（json），下次启动不会重复推送。
+
+    回调在独立工作线程中执行：每个被监听对象（会话）对应一条串行工作
+    线程，保证同一会话内消息按序处理、不同会话间并行。轮询线程只负责
+    读取数据库并分派任务，不会被慢回调（AI 调用/图片识别等）阻塞。
     """
 
     def __init__(self, db: "WeChatDB", interval: float = 1.0,
@@ -1074,6 +1083,10 @@ class Listener:
         self._callbacks: Dict[str, List[callable]] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # 每会话一条串行工作线程：跨会话并行 + 会话内保序
+        self._worker_queues: Dict[str, queue.Queue] = {}
+        self._worker_threads: Dict[str, threading.Thread] = {}
+        self._workers_lock = threading.Lock()
 
     def add_listener(self, user: str, callback: callable) -> None:
         """注册新消息回调：callback(msg: dict, listener)"""
@@ -1103,6 +1116,13 @@ class Listener:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=5)
+        with self._workers_lock:
+            queues = list(self._worker_queues.values())
+            threads = list(self._worker_threads.values())
+        for q in queues:
+            q.put(_LISTENER_STOP)
+        for t in threads:
+            t.join(timeout=5)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1119,12 +1139,39 @@ class Listener:
             if not msgs:
                 continue
             self._watermark[user] = msgs[-1]["sort_seq"]
-            for m in msgs:
-                for cb in callbacks:
-                    try:
-                        cb(m, self)
-                    except Exception as exc:
-                        sys.stderr.write("listener callback error: %r\n" % exc)
+            if not callbacks:
+                continue
+            self._dispatch(user, msgs)
+
+    def _dispatch(self, user: str, msgs: List[dict]) -> None:
+        """把新消息交给该会话的工作线程处理，不阻塞轮询线程。"""
+        with self._workers_lock:
+            q = self._worker_queues.get(user)
+            if q is None:
+                q = queue.Queue()
+                self._worker_queues[user] = q
+                t = threading.Thread(target=self._worker_run, args=(user,),
+                                     name="wxmsg-%s" % user, daemon=True)
+                self._worker_threads[user] = t
+                t.start()
+        cbs = tuple(self._callbacks.get(user, ()))
+        for m in msgs:
+            q.put((m, cbs))
+
+    def _worker_run(self, user: str) -> None:
+        q = self._worker_queues.get(user)
+        if q is None:
+            return
+        while True:
+            task = q.get()
+            if task is _LISTENER_STOP:
+                break
+            m, cbs = task
+            for cb in cbs:
+                try:
+                    cb(m, self)
+                except Exception as exc:
+                    sys.stderr.write("listener callback error: %r\n" % exc)
 
 
 def _extract_path_from_config(content: str) -> Optional[str]:

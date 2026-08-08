@@ -32,6 +32,16 @@ class FriendImageMessage(FriendMessage, ImageMessage):
         super().__init__(control, parent, additonal_attr)
 
 
+class FriendEmojiMessage(FriendMessage, EmojiMessage):
+    def __init__(
+            self,
+            control: uia.Control,
+            parent: "ChatBox",
+            additonal_attr: Dict[str, Any] = {}
+        ):
+        super().__init__(control, parent, additonal_attr)
+
+
 class FriendFileMessage(FriendMessage, FileMessage):
     def __init__(
             self,
