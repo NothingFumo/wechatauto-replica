@@ -188,6 +188,7 @@ def _db_row_to_message(row: dict, chat: 'Chat', self_wxid: str = None) -> 'Messa
     msg.sort_seq = row.get('sort_seq')
     msg.create_time = row.get('create_time')
     msg.wxid = sender_id
+    msg.attr = 'self' if is_self else 'friend'
     sender = _extract_group_sender(content) or getattr(chat, 'who', '')
     msg.sender = sender or getattr(chat, 'who', '')
     msg.sender_remark = msg.sender

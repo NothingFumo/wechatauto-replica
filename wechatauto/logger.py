@@ -107,23 +107,23 @@ class WechatautoLogger:
         if WxParam.ENABLE_FILE_LOGGER and self.file_handler is None:
             self.setup_file_logger()
 
-    def debug(self, msg: str, stacklevel=2, *args, **kwargs):
+    def debug(self, msg: str, *args, stacklevel=2, **kwargs):
         self._ensure_file_logger()  # 确保文件日志初始化
         self.logger.debug(msg, *args, stacklevel=stacklevel, **kwargs)
 
-    def info(self, msg: str, stacklevel=2, *args, **kwargs):
+    def info(self, msg: str, *args, stacklevel=2, **kwargs):
         self._ensure_file_logger()  # 确保文件日志初始化
         self.logger.info(msg, *args, stacklevel=stacklevel, **kwargs)
 
-    def warning(self, msg: str, stacklevel=2, *args, **kwargs):
+    def warning(self, msg: str, *args, stacklevel=2, **kwargs):
         self._ensure_file_logger()  # 确保文件日志初始化
         self.logger.warning(msg, *args, stacklevel=stacklevel, **kwargs)
 
-    def error(self, msg: str, stacklevel=2, *args, **kwargs):
+    def error(self, msg: str, *args, stacklevel=2, **kwargs):
         self._ensure_file_logger()  # 确保文件日志初始化
         self.logger.error(msg, *args, stacklevel=stacklevel, **kwargs)
 
-    def critical(self, msg: str, stacklevel=2, *args, **kwargs):
+    def critical(self, msg: str, *args, stacklevel=2, **kwargs):
         self._ensure_file_logger()  # 确保文件日志初始化
         self.logger.critical(msg, *args, stacklevel=stacklevel, **kwargs)
 

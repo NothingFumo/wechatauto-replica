@@ -361,7 +361,8 @@ class MediaDownloader:
         elif data[:3] == b"GIF":
             ext = "gif"
         elif data[:4] == b"wxgf":
-            ext = "gif"  # 微信动画表情容器
+            # 微信动画表情容器：不是可查看的图片，不落盘为伪 .gif
+            return None
         else:
             ext = "img"
         out = self._out(save_dir, "%s_%s.%s" % (user, local_id, ext))

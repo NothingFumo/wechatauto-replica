@@ -130,6 +130,45 @@ def _decrypt_page(enc_key: bytes, page: bytes, pgno: int) -> bytes:
     return _aes_cbc_decrypt(enc_key, iv, enc) + b"\x00" * RESERVE_SZ
 
 
+def _extract_text_from_blob(content: bytes) -> Optional[str]:
+    """从微信消息容器头中还原 UTF-8 明文文本。
+
+    微信 4.x 部分文本消息的 message_content 为「容器头(0x28 b5 2f fd...)
+    + UTF-8 明文 + 尾部填充(\x01\x00...)」，多数消息明文从第 10 字节开始；
+    长消息可能加密，无法还原返回 None。
+    """
+    def _try_off(off: int) -> Optional[str]:
+        if off >= len(content):
+            return None
+        chunk = content[off:]
+        if b"\x01\x00" in chunk:
+            chunk = chunk.split(b"\x01\x00")[0]
+        try:
+            t = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        t = re.sub(r"[\x00-\x1f\x7f]+", "", t).strip()
+        if not t:
+            return None
+        if not re.search(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", t):
+            return None
+        printable = sum(1 for ch in t if ch.isprintable())
+        if printable / len(t) < 0.6:
+            return None
+        return t
+
+    t = _try_off(10)
+    if t:
+        return t
+    for off in range(0, min(16, len(content))):
+        if off == 10:
+            continue
+        t = _try_off(off)
+        if t:
+            return t
+    return None
+
+
 class WeChatDB:
     """微信 4.x 本地数据库读取器"""
 
@@ -664,6 +703,10 @@ class WeChatDB:
         try:
             text = content.decode("utf-8")
         except UnicodeDecodeError:
+            if content[:4] == b"\x28\xb5\x2f\xfd":
+                text = _extract_text_from_blob(content)
+                if text:
+                    return text
             if mtype == "图片":
                 md5 = re.search(rb'md5="([0-9a-fA-F]{32})"', content)
                 if md5:

@@ -310,6 +310,8 @@ class WeChatGUI:
             raise RuntimeError('未找到微信渲染子窗口')
         self._update_render_rect()
         self.pid = self._get_pid(self.main_hwnd)
+        self._current_chat = None  # 最近打开的会话名，用于连续发送时复用
+        self._last_input_box = None  # 最近一次成功发送的输入框位置，连续发送复用
         wxlog.info(
             f'WeChatGUI 初始化成功：hwnd={self.main_hwnd}, '
             f'render={self.render_hwnd}, rect={self.render_rect}')
@@ -805,10 +807,11 @@ class WeChatGUI:
             return False
 
     def _search_chat(self, name: str) -> bool:
-        """退路：搜索框 + 剪贴板粘贴搜索，点选名称匹配的第一条结果。
+        """退路：搜索框 + 剪贴板粘贴搜索，点选名称匹配的第一条联系人。
 
-        搜索下拉结果排布：先“搜索网络结果”等节标题，再是联系人（带头像图标）。
-        必须按名称前缀匹配联系人行，不能盲目点 res[0]（那是节标题）。
+        搜索下拉结果排布：联系人在最上方，下面是「搜索网络结果 / 搜一搜」
+        等节标题。OCR 结果按 y 排序后，跳过节标题/提示行，点选视觉上
+        第一条匹配名称的联系人行。
         """
         frag = name[:2]
         for _ in range(3):
@@ -822,8 +825,16 @@ class WeChatGUI:
             time.sleep(0.8)
             res = self.ocr((SIDEBAR_LEFT, int(self.render_h * 0.08),
                             self.sidebar_right, self.render_h))
-            for t, x, y, w, h in res:
-                if frag in (t.strip() or ''):
+            rows = sorted(res, key=lambda r: (r[2], r[1]))
+            for t, x, y, w, h in rows:
+                tt = (t.strip() or '')
+                if not tt:
+                    continue
+                # 跳过“搜索/网络/搜一搜”等节标题与提示行
+                if (tt.startswith('搜索') or tt.startswith('搜一搜')
+                        or '网络' in tt or '暂无' in tt):
+                    continue
+                if frag in tt:
                     self.wx_click(self.origin_x + x + w // 2,
                                   self.origin_y + y + h // 2)
                     time.sleep(0.8)
@@ -930,13 +941,28 @@ class WeChatGUI:
         pyperclip.copy(text)
         time.sleep(0.2)
 
-    def input_text(self, text: str) -> bool:
+    def input_text(self, text: str,
+                   box: Optional[Tuple[int, int, int, int]] = None,
+                   fast: bool = False) -> bool:
         """向当前聚焦的输入框输入文字。
 
         优先走「剪贴板 + Ctrl+V」并多次重试确认（输入框探测 / 焦点 /
         粘贴都可能偶发失败，整体循环重试）；均失败后回退到「拼音 +
         回车提交」的输入法组合。
+
+        fast=True 时复用传入 box 走单次快速路径（分段连续发送用），
+        失败即返回 False 由 send_msg 回退到完整流程。
         """
+        if fast and box:
+            if self.focus_input(box):
+                self.set_clipboard(text)
+                self._input.key(VK_A, ctrl=True)
+                self._input.key(VK_DELETE)
+                self._input.key(VK_V, ctrl=True)
+                time.sleep(0.35)
+                if self._input_box_has_text(box):
+                    return True
+            return False
         box = None
         for attempt in range(1, 7):
             box = self.get_input_box()
@@ -953,6 +979,7 @@ class WeChatGUI:
             self._input.key(VK_V, ctrl=True)
             time.sleep(0.8)
             if self._input_box_has_text():
+                self._last_input_box = box
                 wxlog.debug(f'输入文字（剪贴板粘贴）成功，attempt={attempt}')
                 return True
             wxlog.debug(f'剪贴板粘贴未确认（attempt={attempt}），重试')
@@ -987,9 +1014,13 @@ class WeChatGUI:
         except ImportError:
             return ''.join(ch for ch in text if '\u4e00' <= ch <= '\u9fff') or text
 
-    def _input_box_has_text(self) -> bool:
-        """检测输入框文本区是否有深色像素（文字/光标），确认输入生效。"""
-        box = self.get_input_box()
+    def _input_box_has_text(self, box=None) -> bool:
+        """检测输入框文本区是否有深色像素（文字/光标），确认输入生效。
+
+        box 可传入已探测好的输入框，避免连续发送时重复探测。
+        """
+        if box is None:
+            box = self.get_input_box()
         if not box:
             return False
         x0, y0, x1, y1 = box
@@ -1003,13 +1034,23 @@ class WeChatGUI:
     # ------------------------------------------------------------------
     # 发送
     # ------------------------------------------------------------------
-    def click_send(self) -> bool:
+    def click_send(self, fast: bool = False) -> bool:
         """发送消息并确认输入框已清空。
 
         优先回车键（输入框刚粘贴完必已聚焦，回车最可靠）；回车后输入框
         仍有内容则回退到 OCR 定位「发送」按钮点击。每次操作后都必须确认
         输入框文本已清空（即消息真正发出），否则重试。
+
+        fast=True 时仅回车 + 短等待（分段连续发送用），失败返回 False
+        由 send_msg 回退到完整流程。
         """
+        if fast:
+            box = getattr(self, '_last_input_box', None)
+            self._input.key(VK_RETURN)
+            time.sleep(0.5)
+            if not self._input_box_has_text(box):
+                return True
+            return False
         for attempt in range(3):
             self._input.key(VK_RETURN)
             time.sleep(1.0)
@@ -1046,17 +1087,31 @@ class WeChatGUI:
         整条流程带总时限（默认 75s）：打开会话 / 输入 / 发送任一步偶发
         失败时重试；已发送但 DB 未落库时轮询等待确认，不重复发送。
         """
+        # 快速路径：连续发送同一会话（如分段回复）时，复用已探测的输入框，
+        # 跳过 ensure_visible / 会话重检 / 重复探测与截图确认，失败自动回退完整流程。
+        if (not verify and who
+                and who == getattr(self, '_current_chat', None)
+                and getattr(self, '_last_input_box', None) is not None
+                and self.input_text(text, box=self._last_input_box, fast=True)
+                and self.click_send(fast=True)):
+            return WxResponse.success(f'消息已发送：{text}', data={'content': text})
         if not self.ensure_visible():
             return WxResponse.failure('微信窗口不可见（可能锁屏/会话断开）')
+        self._last_input_box = None
         deadline = time.time() + 75
         for attempt in range(3):
             if who:
                 if time.time() > deadline:
                     break
-                if not self.open_chat(who):
-                    wxlog.debug(f'open_chat 未确认（attempt={attempt}），重试')
-                    continue
-                time.sleep(0.8)   # 等右侧面板/输入框渲染稳定，避免探测误判
+                # 会话复用：目标仍是当前已打开会话时跳过 open_chat（每次
+                # open_chat 都重扫侧栏/点击，是逐条发送的主要耗时点）
+                if not (who == getattr(self, '_current_chat', None)
+                        and self._chat_is_open(who)):
+                    if not self.open_chat(who):
+                        wxlog.debug(f'open_chat 未确认（attempt={attempt}），重试')
+                        continue
+                    self._current_chat = who
+                    time.sleep(0.8)   # 等右侧面板/输入框渲染稳定，避免探测误判
             if time.time() > deadline:
                 break
             if not self.input_text(text):
