@@ -3,12 +3,19 @@
 
 背景
 ----
-微信 4.1.12+ 的聊天区域改用自绘渲染（``MMUIRenderSubWindowHW``），
+微信 4.1.12+ 的聊天区域改用自绘渲染（``MMUIRenderSubWindow*``，不同版本
+后缀不同，如 ``MMUIRenderSubWindowHW`` / ``MMUIRenderSubWindow``），
 对 UIAutomation / MSAA 不再暴露任何无障碍节点，因此原 wechatauto 的 UIA
 方案在 4.1.x 上失效。本项目已通过「本地数据库解密」（``wechatauto/db.py``）
 解决读消息；本模块针对**发送消息**补充一条「坐标 + OCR」路线：
 
-    * 通过 Win32 定位微信主窗口与其内的 QtQuick 渲染子窗口；
+    * 通过 Win32 定位微信主窗口与其内的 QtQuick 渲染子窗口（多特征兜底：
+      标题 / 类名前缀 / 进程名 weixin.exe / 可见 / 大尺寸联合评分，类名从
+      「硬条件」降级为「软条件」，Qt 升级改名也不失效；找不到渲染子窗口
+      时直接回退用主窗口矩形计算坐标）；
+    * 布局动态校准：首次运行时实测侧栏边界 / 搜索框 / 发送按钮锚点，保存到
+      ``~/.wechatauto/layout-<机器>.json``，之后自动加载，DPI/布局漂移时
+      输入框探测连续失败会自动重校准；
     * 用 Windows OCR（WinRT ``Windows.Media.Ocr``）识别会话列表 /
       输入框 / 发送按钮在屏幕上的位置；
     * 用真实鼠标事件 + 剪贴板粘贴（Ctrl+V）输入文字（避免中文输入法拦截）；
@@ -36,7 +43,10 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import json
 import os
+import platform
+import re
 import tempfile
 import time
 from ctypes import wintypes
@@ -123,10 +133,12 @@ class MOUSE_INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _MOUSE_UNION)]
 
 
-# 微信 4.x 窗口类名
-WX_MAIN_WIN_CLASS = "Qt51514QWindowIcon"
+# 微信 4.x 窗口类名（不同版本/机型存在差异，统一用前缀匹配兼容所有变体）
+# 主窗口：Qt51514QWindowIcon；渲染子窗口：MMUIRenderSubWindow /
+# MMUIRenderSubWindowHW / 未来其他后缀。按前缀识别可覆盖全部已知/未知变体。
+WX_MAIN_WIN_CLASS_PREFIX = "Qt51514QWindowIcon"
 WX_MAIN_WIN_TITLE = "微信"
-WX_RENDER_WIN_CLASS = "MMUIRenderSubWindowHW"
+WX_RENDER_WIN_CLASS_PREFIX = "MMUIRenderSubWindow"
 
 # 布局比例常量（相对渲染窗口尺寸，跨分辨率自适应）
 # 侧栏宽度约占窗口 22%（微信 4.x 侧栏为固定逻辑宽度，最大化时≈0.22）；
@@ -137,6 +149,69 @@ SIDEBAR_RATIO = 0.22                     # 侧栏宽度 / 窗口宽度
 SIDEBAR_TOP = 0.05                       # 会话列表顶部起始（相对窗口高）
 SEARCH_BOX_RATIO = (0.18, 0.041, 0.86, 0.079)  # (x0,y0,x1,y1)，x 相对侧栏宽、y 相对窗口高
 SEND_BUTTON_RATIO = (0.78, 0.92, 0.995, 0.99)  # 「发送」按钮检索区（相对窗口）
+
+# 多特征兜底：类名只是「软条件」之一，还需 进程名/可见/大尺寸/标题 等特征
+# 联合判断，避免 Qt 升级改名（Qt51514 → Qt6xxx）后主窗口定位失效。
+PROCESS_NAME = 'weixin.exe'              # 微信进程名（小写）
+MIN_WINDOW_SIZE = 800                    # 主窗口最小边长（像素），小于此视为非主窗
+MAIN_TITLE_KEYWORDS = ('微信', 'Weixin', 'WeChat')
+
+# 布局校准配置目录：~/.wechatauto/layout-<机器标识>.json
+LAYOUT_CONFIG_DIR = os.path.join(os.path.expanduser('~'), '.wechatauto')
+
+
+def _machine_id() -> str:
+    """机器标识：主机名 + 屏幕分辨率，用于区分不同机器/DPI 的布局配置。"""
+    try:
+        node = platform.node() or 'unknown'
+    except Exception:
+        node = 'unknown'
+    cx = ctypes.windll.user32.GetSystemMetrics(0)  # SM_CXSCREEN
+    cy = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+    safe = re.sub(r'[^\w\-]', '_', node)
+    return f'{safe}_{cx}x{cy}'
+
+
+def _layout_path() -> str:
+    """返回本机布局校准文件路径（不存在则创建目录）。"""
+    if not os.path.isdir(LAYOUT_CONFIG_DIR):
+        try:
+            os.makedirs(LAYOUT_CONFIG_DIR, exist_ok=True)
+        except Exception:
+            pass
+    return os.path.join(LAYOUT_CONFIG_DIR, f'layout-{_machine_id()}.json')
+
+
+def _restore_keep_maximize(user32, hwnd: int):
+    """取消最小化并显示窗口，同时保留其最大化状态。
+
+    ``ShowWindow(hwnd, SW_RESTORE)`` 会把最大化窗口恢复为普通大小
+    （窗口被缩小）。这里先用 ``GetWindowPlacement`` 记录其最大化状态：
+    原为最大化则用 ``SW_SHOWMAXIMIZED`` 恢复，否则才走 ``SW_RESTORE``。
+    """
+    if not hwnd or not user32.IsWindow(hwnd):
+        return
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+    class _WINDOWPLACEMENT(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.UINT),
+            ("flags", wintypes.UINT),
+            ("showCmd", wintypes.UINT),
+            ("ptMinPosition", _POINT),
+            ("ptMaxPosition", _POINT),
+            ("rcNormalPosition", wintypes.RECT),
+        ]
+
+    wp = _WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(_WINDOWPLACEMENT)
+    if user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+        if wp.showCmd == 3:  # SW_SHOWMAXIMIZED
+            user32.ShowWindow(hwnd, 3)  # 保持/恢复最大化
+            return
+    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
 
 
 # ---------------------------------------------------------------------------
@@ -300,18 +375,29 @@ class WeChatGUI:
         render_rect: 渲染窗口屏幕矩形 (left, top, right, bottom)
     """
 
-    def __init__(self, title: str = WX_MAIN_WIN_TITLE, hwnd: int = None):
+    def __init__(self, title: str = WX_MAIN_WIN_TITLE, hwnd: int = None,
+                 calibrate: bool = False):
         self._input = WinInput()
+        self._sidebar_ratio = SIDEBAR_RATIO
+        self._send_button_ratio = SEND_BUTTON_RATIO
         self.main_hwnd = hwnd or self._find_main_window(title)
         if not self.main_hwnd:
             raise RuntimeError('未找到微信主窗口，请确认微信已登录并运行')
         self.render_hwnd = self._find_render_window(self.main_hwnd)
         if not self.render_hwnd:
-            raise RuntimeError('未找到微信渲染子窗口')
+            # 找不到渲染子窗口（Qt 改版等）→ 直接用主窗口矩形计算坐标
+            wxlog.warning('未找到微信渲染子窗口，回退用主窗口矩形定位坐标')
+            self.render_hwnd = self.main_hwnd
         self._update_render_rect()
         self.pid = self._get_pid(self.main_hwnd)
         self._current_chat = None  # 最近打开的会话名，用于连续发送时复用
         self._last_input_box = None  # 最近一次成功发送的输入框位置，连续发送复用
+        # 布局校准：显式 calibrate=True 强制重校准；否则加载本机已校准配置，
+        # 没有配置则自动校准一次（OCR 可用时），实现「跑一次永久兼容」。
+        if not calibrate:
+            calibrate = not self._load_layout()
+        if calibrate:
+            self.calibrate_layout()
         wxlog.info(
             f'WeChatGUI 初始化成功：hwnd={self.main_hwnd}, '
             f'render={self.render_hwnd}, rect={self.render_rect}')
@@ -319,28 +405,107 @@ class WeChatGUI:
     # ------------------------------------------------------------------
     # 窗口定位
     # ------------------------------------------------------------------
-    def _find_main_window(self, title: str) -> int:
+    def _process_name(self, pid: int) -> str:
+        """返回 pid 对应进程的可执行文件名（小写），失败返回空串。"""
+        if not pid:
+            return ''
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h:
+            return ''
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = wintypes.DWORD(1024)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size))
+            if ok:
+                return os.path.basename(buf.value).lower()
+        except Exception:
+            return ''
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+        return ''
+
+    def _looks_like_main_window(self, hwnd: int) -> bool:
+        """多特征联合判断是否为微信主窗口（类名只是软条件之一）。
+
+        特征：标题含微信关键字 / 类名前缀 Qt51514QWindowIcon* /
+        进程名为 weixin.exe / 可见 / 尺寸 >= MIN_WINDOW_SIZE。任一项都不
+        单独成立，评分（权重和）>=5 才认可，防止 Qt 升级改名后失效。
+        """
         u = self._input._user32
-        hwnd = u.FindWindowW(WX_MAIN_WIN_CLASS, title)
-        if hwnd:
-            return hwnd
-        top = []
+        if not u.IsWindow(hwnd) or not u.IsWindowVisible(hwnd):
+            return False
+        buf = ctypes.create_unicode_buffer(256)
+        cls = ctypes.create_unicode_buffer(256)
+        u.GetWindowTextW(hwnd, buf, 256)
+        u.GetClassNameW(hwnd, cls, 256)
+        title, cls_name = buf.value.strip(), cls.value
+        score = 0
+        if any(k in title for k in MAIN_TITLE_KEYWORDS):
+            score += 5
+        if cls_name.startswith(WX_MAIN_WIN_CLASS_PREFIX):
+            score += 4
+        if self._process_name(self._get_pid(hwnd)) == PROCESS_NAME:
+            score += 3
+        rr = wintypes.RECT()
+        u.GetWindowRect(hwnd, ctypes.byref(rr))
+        if (rr.right - rr.left) >= MIN_WINDOW_SIZE \
+                or (rr.bottom - rr.top) >= MIN_WINDOW_SIZE:
+            score += 2
+        return score >= 5
+
+    def _find_main_window(self, title: str) -> int:
+        """多特征兜底定位微信主窗口。
+
+        类名前缀不再是硬条件（Qt 升级 Qt51514→Qt6xxx 后会改名），改为在
+        所有可见顶层窗口中按「标题/类名/进程名/可见/尺寸」评分，取最高分。
+        找不到时退回按标题精确查找。
+        """
+        u = self._input._user32
+        scored = []
         cb_ref = []
 
         def _cb(h, lp):
+            if not u.IsWindowVisible(h):
+                return True
             buf = ctypes.create_unicode_buffer(256)
             cls = ctypes.create_unicode_buffer(256)
             u.GetWindowTextW(h, buf, 256)
             u.GetClassNameW(h, cls, 256)
-            if cls.value == WX_MAIN_WIN_CLASS and title in buf.value:
-                top.append(h)
-                return False
+            title_text, cls_name = buf.value.strip(), cls.value
+            if not (title_text or cls_name):
+                return True
+            score = 0
+            if any(k in title_text for k in MAIN_TITLE_KEYWORDS):
+                score += 5
+            if cls_name.startswith(WX_MAIN_WIN_CLASS_PREFIX):
+                score += 4
+            if self._process_name(self._get_pid(h)) == PROCESS_NAME:
+                score += 3
+            rr = wintypes.RECT()
+            u.GetWindowRect(h, ctypes.byref(rr))
+            w = rr.right - rr.left
+            ht = rr.bottom - rr.top
+            if w > 0 and ht > 0:
+                if w >= MIN_WINDOW_SIZE or ht >= MIN_WINDOW_SIZE:
+                    score += 2
+                if score >= 5:
+                    scored.append((score, w * ht, h))
             return True
 
         CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
         cb_ref.append(CB(_cb))
         u.EnumWindows(cb_ref[0], 0)
-        return top[0] if top else 0
+        if scored:
+            scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            return scored[0][2]
+        # 完全找不到时退回按标题精确查找
+        hwnd = u.FindWindowW(None, title)
+        if hwnd and self._looks_like_main_window(hwnd):
+            return hwnd
+        return 0
 
     def _find_render_window(self, main_hwnd: int) -> int:
         u = self._input._user32
@@ -350,15 +515,23 @@ class WeChatGUI:
         def _cb(h, lp):
             cls = ctypes.create_unicode_buffer(256)
             u.GetClassNameW(h, cls, 256)
-            if cls.value == WX_RENDER_WIN_CLASS:
-                found.append(h)
-                return False
+            if not cls.value.startswith(WX_RENDER_WIN_CLASS_PREFIX):
+                return True
+            rr = wintypes.RECT()
+            u.GetWindowRect(h, ctypes.byref(rr))
+            w = rr.right - rr.left
+            ht = rr.bottom - rr.top
+            if w > 0 and ht > 0:
+                found.append((w * ht, h))
             return True
 
         CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
         cb_ref.append(CB(_cb))
         u.EnumChildWindows(main_hwnd, cb_ref[0], 0)
-        return found[0] if found else 0
+        if not found:
+            return 0
+        found.sort(key=lambda t: t[0], reverse=True)
+        return found[0][1]
 
     def _get_pid(self, hwnd: int) -> int:
         pid = wintypes.DWORD()
@@ -380,30 +553,160 @@ class WeChatGUI:
         所有硬编码像素坐标替换为按比例计算，保证跨 DPI/分辨率/窗口
         尺寸一致：``sidebar_right``（右面板左边界）、``search_box``
         （左侧搜索框）、``send_button_region``（发送按钮检索区）。
+
+        比例优先取布局校准结果（``_sidebar_ratio`` / ``_send_button_ratio``），
+        未校准时回落到模块默认常量。
         """
-        self.sidebar_right = max(120, int(self.render_w * SIDEBAR_RATIO))
+        sb_ratio = getattr(self, '_sidebar_ratio', SIDEBAR_RATIO)
+        send_ratio = getattr(self, '_send_button_ratio', SEND_BUTTON_RATIO)
+        self.sidebar_right = max(120, int(self.render_w * sb_ratio))
         self.right_pane_left = self.sidebar_right
         sx0, sy0, sx1, sy1 = SEARCH_BOX_RATIO
         self.search_box = (
             int(self.sidebar_right * sx0), int(self.render_h * sy0),
             int(self.sidebar_right * sx1), int(self.render_h * sy1))
-        bx0, by0, bx1, by1 = SEND_BUTTON_RATIO
+        bx0, by0, bx1, by1 = send_ratio
         self.send_button_region = (
             int(self.render_w * bx0), int(self.render_h * by0),
             int(self.render_w * bx1), int(self.render_h * by1))
+
+    # ------------------------------------------------------------------
+    # 布局动态校准（防 DPI/布局漂移）
+    # ------------------------------------------------------------------
+    def _detect_sidebar_ratio(self) -> Optional[float]:
+        """OCR 锚点法实测侧栏宽度比例，失败返回 None。
+
+        微信 4.x 侧栏背景与消息区同为白色，像素边界几乎不可见，唯一稳定
+        的结构锚点是搜索框内的「搜索」占位文本（文本中心 ≈ 侧栏宽的 0.28，
+        实测于本机 3072x1920）。结果钳制在 [0.14, 0.30]，超出正常范围视为
+        误检（如 OCR 读到别处的「搜索」），返回 None 由调用方回退默认比例。
+        """
+        try:
+            for _ in range(2):
+                lines = self.ocr((0, 0, self.render_w, self.render_h))
+                for text, x, y, w, h in lines:
+                    t = (text or '').strip()
+                    if '搜索' in t and x < self.render_w * 0.35 \
+                            and y < self.render_h * 0.3:
+                        cx = x + w // 2
+                        ratio = (cx / 0.28) / self.render_w
+                        if 0.14 <= ratio <= 0.30:
+                            return ratio
+                time.sleep(0.8)
+            return None
+        except Exception:
+            return None
+
+    def calibrate_layout(self, save: bool = True) -> bool:
+        """检测布局锚点并实测布局比例，写入 ``~/.wechatauto/layout-<机器>.json``。
+
+        锚点（实测驱动，所有结果都钳制在合理范围，防误检破坏可用布局）：
+            * 侧栏宽度：OCR 找「搜索」占位文本，反推侧栏右边界；
+            * 发送按钮：OCR 在右下角找「发送」文本，反推检索区比例
+              （发送按钮仅输入框有内容时可见，找不到就保持默认）。
+        校准采用「保守优先」策略：任一项检测失败即用模块默认比例，宁可
+        不做调整也不产生错误的坐标。返回是否成功。
+        """
+        try:
+            self._update_render_rect()
+            self.bring_to_front()
+            time.sleep(0.8)
+            self._update_render_rect()
+            layout: Dict[str, object] = {'machine': _machine_id()}
+            # 1) 侧栏宽度：OCR「搜索」锚点
+            sb = self._detect_sidebar_ratio()
+            layout['sidebar_ratio'] = float(sb) if sb else SIDEBAR_RATIO
+            # 2) 发送按钮：OCR「发送」（仅右下角检索区）
+            try:
+                lines = self.ocr((int(self.render_w * 0.5),
+                                  int(self.render_h * 0.7),
+                                  self.render_w, self.render_h))
+            except Exception:
+                lines = []
+            send = None
+            for text, x, y, w, h in lines:
+                if (text or '').strip() == '发送':
+                    send = (x, y, w, h)
+                    break
+            if send:
+                sx, sy, sw, sh = send
+                # 检索区需略大于按钮本体，OCR 才能稳定命中；四周留边距
+                pad_x, pad_y = 40, 20
+                x0 = max(0, sx - pad_x)
+                y0 = max(0, sy - pad_y)
+                x1 = min(self.render_w, sx + sw + pad_x)
+                y1 = min(self.render_h, sy + sh + pad_y)
+                layout['send_button_ratio'] = [
+                    x0 / self.render_w, y0 / self.render_h,
+                    x1 / self.render_w, y1 / self.render_h]
+            else:
+                layout['send_button_ratio'] = list(SEND_BUTTON_RATIO)
+            layout['render_w'] = self.render_w
+            layout['render_h'] = self.render_h
+            layout['date'] = time.strftime('%Y-%m-%d %H:%M:%S')
+            if save:
+                try:
+                    with open(_layout_path(), 'w', encoding='utf-8') as f:
+                        json.dump(layout, f, ensure_ascii=False, indent=2)
+                except Exception as e:
+                    wxlog.debug(f'保存布局校准文件失败：{e}')
+            self._apply_layout(layout)
+            wxlog.info(
+                f'布局校准完成：sidebar_ratio={layout["sidebar_ratio"]:.3f}, '
+                f'send_button_ratio={layout["send_button_ratio"]}')
+            return True
+        except Exception as e:
+            wxlog.debug(f'布局校准失败：{e}')
+            return False
+
+    def _apply_layout(self, d: dict) -> None:
+        """应用布局校准结果并重算各布局区域。"""
+        self._sidebar_ratio = float(d.get('sidebar_ratio', SIDEBAR_RATIO))
+        sb = d.get('send_button_ratio')
+        if isinstance(sb, (list, tuple)) and len(sb) == 4:
+            try:
+                self._send_button_ratio = tuple(float(v) for v in sb)
+            except Exception:
+                self._send_button_ratio = SEND_BUTTON_RATIO
+        self._update_layout()
+
+    def _load_layout(self) -> bool:
+        """运行前自动加载本机已校准的布局配置，返回是否成功采用。
+
+        窗口尺寸与校准当时差异过大（>15%，如窗口缩放/未最大化）时视为
+        布局不匹配，拒绝采用并触发重新校准。
+        """
+        p = _layout_path()
+        if not os.path.isfile(p):
+            return False
+        try:
+            with open(p, encoding='utf-8') as f:
+                d = json.load(f)
+        except Exception:
+            return False
+        if abs(float(d.get('render_w', 0) or 0) - self.render_w) \
+                / max(self.render_w, 1) > 0.15:
+            wxlog.info(
+                f'布局配置与当前窗口尺寸差异过大，忽略并重新校准'
+                f'（校准={d.get("render_w")} vs 当前={self.render_w}）')
+            return False
+        self._apply_layout(d)
+        wxlog.info(f'已加载布局校准：sidebar_ratio={self._sidebar_ratio:.3f}')
+        return True
 
     def use_window(self, top_hwnd: int) -> bool:
         """把 GUI 操作目标切换到指定顶层微信窗口（主窗或独立聊天窗）。
 
         微信 4.x 通过搜索打开会话时会生成独立聊天窗口（标题如
         “昵称与X的聊天记录”）。切换后 render_rect/origin 等随新窗口更新，
-        click/paste/OCR 等原语无需改动即可在新窗口内工作。
+        click/paste/OCR 等原语无需改动即可在新窗口内工作。找不到渲染
+        子窗口时直接用该顶层窗口矩形计算坐标。
         """
         if not top_hwnd or not self._input._user32.IsWindow(top_hwnd):
             return False
         render = self._find_render_window(top_hwnd)
         if not render:
-            return False
+            render = top_hwnd  # 渲染窗口缺失时回退用窗口矩形
         self.main_hwnd = top_hwnd
         self.render_hwnd = render
         self._update_render_rect()
@@ -468,7 +771,7 @@ class WeChatGUI:
             tid_t = u.GetWindowThreadProcessId(self.main_hwnd, None)
             if tid_fg:
                 u.AttachThreadInput(tid_fg, tid_t, True)
-            u.ShowWindow(self.main_hwnd, 9)  # SW_RESTORE
+            _restore_keep_maximize(u, self.main_hwnd)
             u.SetWindowPos(self.main_hwnd, -1, 0, 0, 0, 0,
                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)  # HWND_TOPMOST
             u.SetForegroundWindow(self.main_hwnd)
@@ -553,7 +856,7 @@ class WeChatGUI:
     def wx_click(self, x: int, y: int, right: bool = False):
         """点击微信渲染窗口内的坐标。
 
-        微信渲染子窗口（MMUIRenderSubWindowHW）设置了
+        微信渲染子窗口（MMUIRenderSubWindow*）设置了
         ``WS_EX_LAYERED | WS_EX_TRANSPARENT``，导致 mouse_event
         的点击会穿透到主窗口而无法到达渲染层。此方法在点击前后
         临时去掉 ``WS_EX_TRANSPARENT``，使点击能被渲染窗口接收，
@@ -748,7 +1051,7 @@ class WeChatGUI:
         if self._search_chat(name):
             sub = self._find_chat_window(name)
             if sub:
-                self._input._user32.ShowWindow(sub, 9)  # SW_RESTORE
+                _restore_keep_maximize(self._input._user32, sub)
                 self._input._user32.SetForegroundWindow(sub)
                 time.sleep(0.5)
                 self.use_window(sub)
@@ -859,6 +1162,19 @@ class WeChatGUI:
                 return box
             time.sleep(0.5)
             self._update_render_rect()
+        wxlog.debug('未检测到输入框')
+        # 布局异常自动重校准：本机校准配置可能已不匹配（DPI/布局漂移），
+        # 重新检测锚点并校准一次后再次探测（每会话只自动触发一次）。
+        if not getattr(self, '_auto_recalibrated', False):
+            self._auto_recalibrated = True
+            wxlog.info('输入框探测连续失败，自动重新校准布局…')
+            self.calibrate_layout()
+            for _ in range(3):
+                box = self._probe_input_box()
+                if box:
+                    return box
+                time.sleep(0.5)
+                self._update_render_rect()
         wxlog.debug('未检测到输入框')
         # 兜底：输入框与底部工具栏高度固定，窗口缩放只改变消息区高度。
         # 实测本机输入框上边 ≈ render_h-391、下边 ≈ render_h-150。

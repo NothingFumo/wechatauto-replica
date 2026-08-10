@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """微信 4.x UI 自动化（发送消息）
 
-微信 4.x 主窗口是完全自绘的（MMUIRenderSubWindowHW），UIA 树不可用，
+微信 4.x 主窗口是完全自绘的（MMUIRenderSubWindow*，不同版本后缀不同），UIA 树不可用，
 因此采用坐标模拟：激活窗口 → 点击搜索框 → 输入联系人关键词 → Enter
 打开会话 → 点击输入框 → 输入文本 → Enter 发送。
 
@@ -33,6 +33,38 @@ _user32.GetDpiForWindow.restype = wintypes.UINT
 
 # WeChat 4.x 主窗口类名
 MAIN_WND_CLASS = "Qt51514QWindowIcon"
+
+
+def _restore_keep_maximize(hwnd: int):
+    """取消最小化并显示窗口，同时保留其最大化状态。
+
+    ``ShowWindow(hwnd, SW_RESTORE)`` 会把最大化窗口恢复为普通大小（窗口被
+    缩小）。先用 ``GetWindowPlacement`` 记录最大化状态：原为最大化则用
+    ``SW_SHOWMAXIMIZED`` 恢复，否则才走 ``SW_RESTORE``。
+    """
+    if not hwnd or not _user32.IsWindow(hwnd):
+        return
+
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+    class _WINDOWPLACEMENT(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.UINT),
+            ("flags", wintypes.UINT),
+            ("showCmd", wintypes.UINT),
+            ("ptMinPosition", _POINT),
+            ("ptMaxPosition", _POINT),
+            ("rcNormalPosition", wintypes.RECT),
+        ]
+
+    wp = _WINDOWPLACEMENT()
+    wp.length = ctypes.sizeof(_WINDOWPLACEMENT)
+    if _user32.GetWindowPlacement(hwnd, ctypes.byref(wp)):
+        if wp.showCmd == 3:  # SW_SHOWMAXIMIZED
+            _user32.ShowWindow(hwnd, 3)  # 保持/恢复最大化
+            return
+    _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
 
 INPUT_EVENT = 0x0002
 KEYEVENTF_KEYUP = 0x0002
@@ -115,8 +147,11 @@ def click(x: int, y: int):
 
 
 def find_main_window():
-    """返回主窗口句柄（或 None）"""
-    return _user32.FindWindowW(MAIN_WND_CLASS, None) or None
+    """返回主窗口句柄（或 None）。先按类名，失败再按标题兜底（兼容不同版本类名）。"""
+    hwnd = _user32.FindWindowW(MAIN_WND_CLASS, None)
+    if hwnd:
+        return hwnd
+    return _user32.FindWindowW(None, "微信") or None
 
 
 def window_rect(hwnd):
@@ -143,7 +178,7 @@ class WeChatUI:
             raise RuntimeError("未找到微信主窗口")
 
     def activate(self):
-        _user32.ShowWindow(self.hwnd, 9)  # SW_RESTORE
+        _restore_keep_maximize(self.hwnd)
         _user32.SetForegroundWindow(self.hwnd)
         time.sleep(0.5)
 

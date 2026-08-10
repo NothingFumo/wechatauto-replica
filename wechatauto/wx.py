@@ -4,7 +4,8 @@
 ========
 早期版本基于 UIAutomation（``mmui::*`` 控件树）驱动微信；但当前
 4.1.x 客户端使用 QtQuick 自绘界面，UIA 树中不暴露任何 ``mmui::``
-控件（只有 ``Qt51514QWindowIcon`` + ``MMUIRenderSubWindowHW``，子树为空），
+控件（只有 ``Qt51514QWindowIcon`` + ``MMUIRenderSubWindow*`` 渲染子窗口，
+后缀随版本不同，子树为空），
 因此 UIA 路线已不可用。
 
 本模块把 :class:`WeChat` / :class:`Chat` 的公共 API 重新实现为

@@ -3,7 +3,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.0.3
+> 当前版本：1.0.4
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -12,6 +12,23 @@
 ---
 
 ## 版本记录
+
+### v1.0.4（2026-08-10）
+
+- **多特征兜底窗口定位**：主窗口定位不再只依赖类名 `Qt51514QWindowIcon`
+  （类名降级为软条件），联合 进程名 `weixin.exe` / 窗口可见 / 大尺寸
+  （≥800px）/ 标题关键词（微信/Weixin/WeChat）评分定位——Qt 升级改名
+  （`Qt51514` → `Qt6xxx`）也不失效；渲染子窗口按前缀 `MMUIRenderSubWindow`
+  匹配（兼容 `MMUIRenderSubWindowHW` / `MMUIRenderSubWindow` 等变体），
+  找不到时退回用主窗口矩形计算坐标。
+- **布局自动校准**：首次运行自动校准——OCR 检测「搜索」「发送」锚点实测
+  布局比例，保存到 `~/.wechatauto/layout-<机器标识>.json`，之后自动加载；
+  布局漂移（DPI/窗口尺寸/缩放变化）时自动重新校准。
+- **最大化状态保持**：激活窗口时先 `GetWindowPlacement` 记录状态，原为
+  最大化则用 `SW_SHOWMAXIMIZED` 恢复（原 `SW_RESTORE` 会把最大化窗口
+  缩成普通大小），最小化恢复不再破坏用户窗口布局。
+- **发送模块窗口兜底**：`find_main_window` 类名查找失败后按标题「微信」
+  兜底，适配类名不同的机器。
 
 ### v1.0.3（2026-08-08）
 
@@ -69,7 +86,8 @@
 | 发送文件/图片/回复/艾特 | ✅ 已完成并验证 | 剪贴板 CF_HDROP + OCR |
 | UI 自动化（UIAutomation） | ⚠️ 受限 | 微信 4.1.12+ 聊天区域自绘渲染，不暴露无障碍节点 |
 
-**结论**：微信 4.1.x 聊天界面使用自绘渲染（`MMUIRenderSubWindowHW`），对
+**结论**：微信 4.1.x 聊天界面使用自绘渲染（`MMUIRenderSubWindow*`，不同版本
+后缀不同，如 `MMUIRenderSubWindowHW` / `MMUIRenderSubWindow`），对
 UIAutomation / MSAA 完全不暴露内容，原 wxauto 的 UI 方案失效。本项目采用
 「**本地数据库解密**」读取（已全链路验证）、「**坐标 + OCR**」发送
 （已实测：文本/文件/图片发送稳定，回复/艾特见 `demo_reply_at.py`）。
@@ -357,9 +375,14 @@ def on_msg(msg, listener):
 微信 4.1.12+ 聊天界面自绘渲染、无无障碍节点，发送走
 「屏幕坐标 + 本地 OCR」（`wechatauto/guia.py`）：
 
-1. 按类名 `Qt51514QWindowIcon` 找主窗口，再找渲染子窗口
-   `MMUIRenderSubWindowHW`；
-2. 布局用渲染子窗口相对坐标描述，运行时换算为屏幕绝对坐标；
+1. **多特征兜底定位**主窗口（类名 `Qt51514QWindowIcon` 只是「软条件」，
+   联合标题 / 进程名 `weixin.exe` / 可见 / 大尺寸评分，Qt 升级改名也不
+   失效），再按前缀 `MMUIRenderSubWindow` 找渲染子窗口（兼容
+   `MMUIRenderSubWindowHW` / `MMUIRenderSubWindow` 等不同版本类名；
+   找不到时回退用主窗口矩形计算坐标）；
+2. 布局用渲染子窗口相对坐标描述，运行时换算为屏幕绝对坐标；首次运行自动
+   校准（OCR 检测「搜索/发送」锚点实测比例），保存到
+   `~/.wechatauto/layout-<机器>.json`，之后自动加载、布局漂移自动重校准；
 3. OCR 识别会话列表点击目标（失败走搜索框）；
 4. 扫描输入框白色区定位并聚焦；
 5. 文字以「剪贴板 + Ctrl+V」输入（避免中文输入法拦截），失败回退拼音组合；
