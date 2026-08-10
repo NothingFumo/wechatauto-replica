@@ -169,24 +169,24 @@ class EmojiMessage(BaseMessage):
             except Exception:
                 pass
             attr = getattr(self, 'attr', 'friend')
-            # 方向感知：对方消息优先用左侧头像锚定消息顶部；自己消息用
-            # 消息分隔空白定位。任一失败回退到另一种方式。
-            if attr == 'self':
+            want_left = (attr != 'self')
+            # 主路径：连通域精确锁定最后一条消息的气泡内容。
+            # 该算法会过滤细长竖条（滚动条/面板边框）并剔除头像类小元素，
+            # 避免右侧滚动条/边框被当成内容导致裁出大片空白；同时按方向
+            # 取左侧（对方）或右侧（自己）的底部消息。
+            crop = self._crop_last_bubble(img, want_left=want_left)
+            used = 'cc'
+            # 太小的结果(时间戳/文字等)视为误判，回退到其他方法
+            if crop is None or min(crop.size) < 50:
                 crop = self._crop_bottom_message(img)
                 used = 'blank'
-                if crop is None:
-                    crop = self._crop_by_avatar(img)
-                    used = 'avatar'
-            else:
+            if crop is None or min(crop.size) < 50:
                 crop = self._crop_by_avatar(img)
                 used = 'avatar'
-                if crop is None:
-                    crop = self._crop_bottom_message(img)
-                    used = 'blank'
             print(f'[CAP] attr={attr} img={img.size} '
                   f'used={used} crop={crop.size if crop else None}')
-            if crop is None:
-                wxlog.warning('表情截图失败：消息区域内容为空')
+            if crop is None or min(crop.size) < 50:
+                wxlog.warning('表情截图失败：内容区域过小')
                 return None
             crop = self._content_bbox_crop(crop)
             if crop is None:
@@ -314,6 +314,8 @@ class EmojiMessage(BaseMessage):
         底部消息的顶部边界用「连续空白行超过阈值」判定。阈值自适应取
         消息区高度的 2.5%（采样行），跨分辨率/DPI 保持一致：大于表情包
         图片内部的小留白、小于消息列表相邻消息的分隔留白。
+
+        同时裁掉左侧头像区域：从左向右扫描，找到内容起始列，跳过头像。
         """
         try:
             w, h = img.size
@@ -351,7 +353,68 @@ class EmojiMessage(BaseMessage):
             y1 = min(h, bottom * 2 + pad + 1)
             if y1 - y0 < 8:
                 return None
-            return img.crop((0, y0, w, y1))
+            # 水平裁剪：从左向右找内容起始列，跳过头像区域
+            left_x = 0
+            for x in range(0, w, 2):
+                cnt = 0
+                for y in range(y0, y1, 3):
+                    p = img.getpixel((x, y))
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 2:
+                    left_x = x
+                    break
+            # 头像宽度约 40-50px（逻辑），跳过头像后再找内容空白间隔后的起始列
+            if left_x < w * 0.15:
+                # 可能命中了头像，继续向右找内容空白间隔后的起始列
+                in_avatar = False
+                avatar_end = left_x + int(w * 0.05)  # 头像最小宽度约 5% 窗口宽
+                for x in range(left_x, min(w, int(w * 0.30)), 2):
+                    cnt = 0
+                    for y in range(y0, y1, 3):
+                        p = img.getpixel((x, y))
+                        if len(p) >= 3:
+                            r, g, b = p[0], p[1], p[2]
+                        else:
+                            r = g = b = p
+                        mxv = max(r, g, b)
+                        mnv = min(r, g, b)
+                        if not (mxv > 235 and (mxv - mnv) < 22):
+                            cnt += 1
+                    if cnt <= 2:
+                        in_avatar = True
+                    elif in_avatar:
+                        # 从头像空白区进入内容区
+                        left_x = x
+                        break
+                else:
+                    # 未找到空白间隔（头像紧贴内容），按头像宽度跳过
+                    if left_x < avatar_end:
+                        left_x = avatar_end
+            # 右侧裁剪：从右向左找内容结束列，裁掉右侧空白
+            right_x = w
+            for x in range(w - 1, left_x, -2):
+                cnt = 0
+                for y in range(y0, y1, 3):
+                    p = img.getpixel((x, y))
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 2:
+                    right_x = x
+                    break
+            return img.crop((left_x, y0, min(w, right_x + pad + 1), y1))
         except Exception:
             return None
 
@@ -426,7 +489,64 @@ class EmojiMessage(BaseMessage):
             y1 = min(h, bottom + pad + 1)
             if y1 - y0 < 8:
                 return None
-            return img.crop((0, y0, w, y1))
+            # 水平裁剪：跳过左侧头像，找内容真正起始列
+            left_x = 0
+            for x in range(0, w, 2):
+                cnt = 0
+                for y in range(y0, y1, 3):
+                    p = px[x, y]
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 2:
+                    left_x = x
+                    break
+            if left_x < w * 0.15:
+                in_avatar = False
+                avatar_end = left_x + int(w * 0.05)
+                for x in range(left_x, min(w, int(w * 0.30)), 2):
+                    cnt = 0
+                    for y in range(y0, y1, 3):
+                        p = px[x, y]
+                        if len(p) >= 3:
+                            r, g, b = p[0], p[1], p[2]
+                        else:
+                            r = g = b = p
+                        mxv = max(r, g, b)
+                        mnv = min(r, g, b)
+                        if not (mxv > 235 and (mxv - mnv) < 22):
+                            cnt += 1
+                    if cnt <= 2:
+                        in_avatar = True
+                    elif in_avatar:
+                        left_x = x
+                        break
+                else:
+                    if left_x < avatar_end:
+                        left_x = avatar_end
+            # 右侧裁剪：从右向左找内容结束列，裁掉右侧空白
+            right_x = w
+            for x in range(w - 1, left_x, -2):
+                cnt = 0
+                for y in range(y0, y1, 3):
+                    p = px[x, y]
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 2:
+                    right_x = x
+                    break
+            return img.crop((left_x, y0, min(w, right_x + pad + 1), y1))
         except Exception:
             return None
 
@@ -591,20 +711,39 @@ class EmojiMessage(BaseMessage):
         if not groups:
             return None
         # 选择目标消息组：从底部向上找第一组目标方向的（气泡在左=对方、
-        # 在右=自己）；方向不明时取最底部一组
+        # 在右=自己）；方向不明时取最底部一组。
+        # 跳过太小的组（时间戳 / 系统文字等非消息内容）：
+        # 在原图坐标下，宽 < 30 或高 < 20 的组视为噪声跳过。
         if want_left is None:
             bottom = max(groups, key=lambda g: g[1])
         else:
-            mid = sw / 2.0
+            # 方向判定加阈值：左侧(对方)消息中心应在左 45%，右侧(自己)
+            # 应在右 55%。聊天里居中的时间戳(≈50%)两边都不满足，不会
+            # 被误当成消息截取。
+            left_max = sw * 0.45
+            right_min = sw * 0.55
+            min_gw = 30
+            min_gh = 20
             bottom = None
             for g in sorted(groups, key=lambda g: g[1], reverse=True):
                 comps_list = g[0]
                 xs = [c[1] for c in comps_list]
                 xe = [c[3] for c in comps_list]
+                ys = [c[2] for c in comps_list]
+                ye = [c[4] for c in comps_list]
+                gw = (max(xe) - min(xs) + 1) * scale
+                gh = (max(ye) - min(ys) + 1) * scale
+                if gw < min_gw or gh < min_gh:
+                    continue
                 center = (min(xs) + max(xe)) / 2.0
-                if (want_left and center < mid) or (not want_left and center >= mid):
-                    bottom = g
-                    break
+                if want_left:
+                    if center < left_max:
+                        bottom = g
+                        break
+                else:
+                    if center > right_min:
+                        bottom = g
+                        break
             if bottom is None:
                 bottom = max(groups, key=lambda g: g[1])
 
@@ -637,11 +776,64 @@ class EmojiMessage(BaseMessage):
                     bbox[2] = min(bmaxx, eminx - 1)
 
         # 6. 换算回原图并加边距
-        pad = max(2, scale)
+        # 圆形表情顶部/底部在缩放时因 LANCZOS 模糊丢失边缘像素；
+        # 缩放倍数越高丢失越多（约 2-5 个缩放像素），用 scale*5 补偿
+        pad = max(10, scale * 5)
         x0 = max(0, bbox[0] * scale - pad)
         y0 = max(0, bbox[1] * scale - pad)
         x1 = min(w, (bbox[2] + 1) * scale + pad)
         y1 = min(h, (bbox[3] + 1) * scale + pad)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        # 7. 全分辨率边缘扩展：找回缩放时丢失的边缘像素
+        # 逐像素采样确保圆形窄边缘不被遗漏；
+        # 向上/向下遇连续空白行（消息间分隔）停止，避免吃进相邻消息
+        try:
+            px = img.load()
+            gap_threshold = 3
+
+            def _is_bg(x, y):
+                p = px[x, y][:3]
+                mxv = max(p)
+                return mxv > 235 and (mxv - min(p)) < 22
+
+            def _row_cnt(y, ax0, ax1):
+                return sum(1 for x in range(ax0, ax1) if not _is_bg(x, y))
+
+            # 向上扩展：逐行上移，遇连续空白行则停
+            for y in range(y0 - 1, max(0, y0 - pad * 4), -1):
+                if _row_cnt(y, x0, x1) > 2:
+                    y0 = y
+                else:
+                    blank = all(_row_cnt(yy, x0, x1) <= 2
+                                for yy in range(y, min(y0, y + gap_threshold)))
+                    if blank:
+                        break
+            # 向下扩展
+            for y in range(y1, min(h, y1 + pad * 4)):
+                if _row_cnt(y, x0, x1) > 2:
+                    y1 = y + 1
+                else:
+                    blank = all(_row_cnt(yy, x0, x1) <= 2
+                                for yy in range(max(y1, y - gap_threshold + 1), y + 1))
+                    if blank:
+                        break
+            # 向左扩展
+            for x in range(x0 - 1, max(0, x0 - pad * 4), -1):
+                cnt = sum(1 for y in range(y0, y1) if not _is_bg(x, y))
+                if cnt > 2:
+                    x0 = x
+                else:
+                    break
+            # 向右扩展
+            for x in range(x1, min(w, x1 + pad * 4)):
+                cnt = sum(1 for y in range(y0, y1) if not _is_bg(x, y))
+                if cnt > 2:
+                    x1 = x + 1
+                else:
+                    break
+        except Exception:
+            pass
         if x1 - x0 < 8 or y1 - y0 < 8:
             return None
         return img.crop((x0, y0, x1, y1))

@@ -85,7 +85,7 @@ def main():
     args = [a for a in sys.argv[1:]]
     listen = "--listen" in args
     names = [a for a in args if not a.startswith("--")]
-    who = names[0] if names else "文件传输助手"
+    who = names[0] if names else "送你挖银子"
 
     wx = WeChat()
     print(f"当前登录：{wx.nickname}")
