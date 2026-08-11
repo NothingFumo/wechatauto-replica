@@ -24,3 +24,6 @@ env/
 .vscode/
 *.swp
 COMMIT_MSG.txt
+
+# sibling repo
+WeChatBot-new/
