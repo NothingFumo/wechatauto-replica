@@ -845,13 +845,24 @@ class WeChatGUI:
 
         发送类操作前调用，替代「手动最小化 Chrome 再置顶微信」的步骤。
         遮挡窗口最小化后微信仍保持置顶，便于连续多次发送。
+
+        批量发送（三件套等）会逐条调用本方法，为避免每条都重复
+        枚举窗口 / 置顶（上轮实测每次开销 20s+），15 秒内已成功
+        前置过且窗口仍存活则直接复用，不再重复扫描。
         """
+        if (getattr(self, '_last_visible_ok', False)
+                and getattr(self, '_last_visible_ts', 0) > time.time() - 15
+                and self.is_alive()):
+            return True
         self._minimize_blockers()
         time.sleep(0.8)
         self.bring_to_front(keep_topmost=True)
         time.sleep(0.5)
         self._update_render_rect()
-        return self.desktop_available()
+        ok = self.desktop_available()
+        self._last_visible_ok = ok
+        self._last_visible_ts = time.time()
+        return ok
 
     def wx_click(self, x: int, y: int, right: bool = False):
         """点击微信渲染窗口内的坐标。
@@ -947,18 +958,39 @@ class WeChatGUI:
             out.append((text, rel_box[0] + x, rel_box[1] + y, w, h))
         return out
 
+    def ocr_zoomed(self, rel_box: Tuple[int, int, int, int],
+                   scale: int = 3) -> List[Tuple[str, int, int, int, int]]:
+        """对渲染窗口相对区域放大 scale 倍后 OCR，返回渲染相对坐标。
+
+        微信 4.x 的小字号标题（尤其含生僻字如「卢立竺」）原尺寸 OCR 常
+        漏识别或读出乱码，放大后识别率显著提升。坐标按 1/scale 还原。
+        """
+        screen_box = self._rel_to_screen(rel_box)
+        img = self._grab_screen(screen_box)
+        w, h = img.size
+        img = img.resize((w * scale, h * scale), Image.LANCZOS)
+        res = ScreenOCR.recognize(img)
+        out = []
+        for text, x, y, w, h in res:
+            out.append((text, rel_box[0] + x // scale,
+                        rel_box[1] + y // scale, w // scale, h // scale))
+        return out
+
     # ------------------------------------------------------------------
     # 会话列表
     # ------------------------------------------------------------------
-    def get_sessions(self) -> List[Dict[str, object]]:
+    def get_sessions(self, zoomed: bool = False) -> List[Dict[str, object]]:
         """OCR 识别左侧会话列表，返回 [{name, x, y, w, h}]（渲染相对坐标）。
 
         会话名文本约占侧栏宽的 30%~100%；左侧 <30% 为头像/未读角标，
         右侧为时间戳。均按比例过滤，跨分辨率一致。
+
+        zoomed=True 时对整块侧栏放大 3 倍后 OCR，用于原尺寸扫不到
+        （生僻字/小字号）时兜底；速度较慢，仅按需启用。
         """
         rel = (SIDEBAR_LEFT, int(self.render_h * SIDEBAR_TOP),
                self.sidebar_right, self.render_h)
-        lines = self.ocr(rel)
+        lines = self.ocr_zoomed(rel, scale=3) if zoomed else self.ocr(rel)
         rows = []
         for text, x, y, w, h in lines:
             t = (text or '').strip()
@@ -971,28 +1003,115 @@ class WeChatGUI:
             rows.append({'name': t, 'x': x, 'y': y, 'w': w, 'h': h})
         return rows
 
+    @staticmethod
+    def _name_matches(ocr_name: str, target: str) -> bool:
+        """OCR 会话名的韧性匹配，容忍首尾字符截断/粘连。
+
+        微信 4.x 标题 OCR 常把首字截掉（'文件传输助手'→'件传输助'），
+        因此不能只用精确相等或 startswith。匹配优先级：
+            1. 完整相等
+            2. 识别名是目标名的一段（截首/截尾/截中）
+            3. 识别名更长时目标名是其子串（识别名带多余字符）
+        """
+        a = (ocr_name or '').strip()
+        b = (target or '').strip()
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        # 截断容忍：OCR 名是目标名的一段（识别名比目标短，属截首/截尾/截中）
+        if a in b:
+            return True
+        # 识别名更长（含多余字符）：仅当识别名 >= 3 字时接受子串命中，
+        # 避免目标名（如 2 字）是较长识别名前缀导致的误点
+        if b in a and len(a) >= 3:
+            return True
+        return False
+
     def find_session(self, name: str, max_scroll: int = 3) -> Optional[Tuple[int, int]]:
         """在会话列表中查找指定会话，返回可点击的 (相对x, 相对y)。
 
         点击点取 OCR 文本框中心（而非硬编码列坐标），自动适配任何
         窗口宽度/DPI。渲染可能在窗口置前台后短暂未刷新，先重复纯 OCR
         再滚动；找不到时悬停列表滚动重试。
+
+        滚动方向自适应：先向上翻找列表上半段的高亮会话（已打开的会话
+        会被置顶），找不到再向下滚动其它区域。
         """
         u = self._input._user32
+
+        def _scan(zoomed: bool = False) -> Optional[Tuple[int, int]]:
+            # 按 y 排序，OCR 返回顺序不可靠，保证点击视觉上正确的行
+            for row in sorted(self.get_sessions(zoomed=zoomed), key=lambda r: r['y']):
+                if self._name_matches(row['name'], name):
+                    return (row['x'] + row['w'] // 2, row['y'] + row['h'] // 2)
+            return None
+
+        def _scan_vote(zoomed: bool = False, rounds: int = 4,
+                       min_votes: int = 2,
+                       tol: int = 30) -> Optional[Tuple[int, int]]:
+            """多轮 OCR 投票找会话行，抗单轮识别抖动。
+
+            WinRT OCR 对生僻字/小字号（如「卢立竺」）存在抖动：同一行
+            不同轮次可能读出「卢立竺」或「亠人五」。逐轮扫描并把命中行
+            按 y 聚类，票数达到 min_votes 才返回，显著降低误配率。
+            """
+            hits = []  # (y, x, w, h)
+            for _ in range(rounds):
+                # 每轮只取 y 最靠前的一个命中，避免同轮多个误配行干扰
+                for row in sorted(self.get_sessions(zoomed=zoomed),
+                                  key=lambda r: r['y']):
+                    if self._name_matches(row['name'], name):
+                        hits.append((row['y'], row['x'], row['w'], row['h']))
+                        break
+                time.sleep(0.15)
+            if not hits:
+                return None
+            hits.sort()
+            clusters = []  # [y均值, x均值, w均值, h均值, 票数]
+            for y, x, w, h in hits:
+                for c in clusters:
+                    if abs(c[0] - y) <= tol:
+                        c[4] += 1
+                        n = c[4]
+                        c[0] = (c[0] * (n - 1) + y) / n
+                        c[1] = (c[1] * (n - 1) + x) / n
+                        c[2] = max(c[2], w)
+                        c[3] = max(c[3], h)
+                        break
+                else:
+                    clusters.append([float(y), float(x), w, h, 1])
+            best = max(clusters, key=lambda c: c[4])
+            if best[4] < min_votes:
+                return None
+            return (int(best[1] + best[2] // 2), int(best[0] + best[3] // 2))
+
         for _ in range(2):          # 先不带滚动重试 OCR，等渲染刷新
-            for row in self.get_sessions():
-                if row['name'] == name or row['name'].startswith(name):
-                    return (row['x'] + row['w'] // 2, row['y'] + row['h'] // 2)
+            hit = _scan()
+            if hit:
+                return hit
             time.sleep(0.4)
+        # 原尺寸扫不到 → 放大 3 倍多轮投票（生僻字/小字号会话，如「卢立竺」）
+        hit = _scan_vote(zoomed=True)
+        if hit:
+            return hit
         for _ in range(max_scroll):
-            for row in self.get_sessions():
-                if row['name'] == name or row['name'].startswith(name):
-                    return (row['x'] + row['w'] // 2, row['y'] + row['h'] // 2)
-            # 未找到 → 鼠标悬停会话列表后滚轮向上滚动
+            hit = _scan()
+            if hit:
+                return hit
+            # 未找到 → 悬停会话列表，先向上翻再向下翻各试探
             u.SetCursorPos(self.origin_x + self.sidebar_right // 2,
                            self.origin_y + int(self.render_h * 0.5))
             time.sleep(0.2)
             self.wx_wheel(-360)
+            time.sleep(0.6)
+            hit = _scan()
+            if hit:
+                return hit
+            hit = _scan_vote(zoomed=True)
+            if hit:
+                return hit
+            self.wx_wheel(360)
             time.sleep(0.6)
         return None
 
@@ -1028,8 +1147,12 @@ class WeChatGUI:
         """
         if not self.ensure_visible():
             wxlog.warning('无法将微信窗口置于前台，尝试继续操作')
-        # 优先侧栏：多轮「查找 + 点击 + 确认」（侧栏点击最可靠）
+        # 优先：右侧面板当前已打开目标会话 → 直接成功
+        # （微信 4.x 已打开的会话才渲染右侧，侧栏查找反而慢且易误配）
         self._update_render_rect()
+        if self._chat_is_open(name) and self._pane_has_content():
+            return True
+        # 优先侧栏：多轮「查找 + 点击 + 确认」（侧栏点击最可靠）
         for _ in range(3):
             pos = self.find_session(name)
             if pos:
@@ -1066,9 +1189,17 @@ class WeChatGUI:
 
         微信 4.x 聊天标题为浅灰渲染、OCR 常读不到，因此标题命中算最可靠
         证据，读不到时以「消息区已渲染非空白」作为会话已打开的判据。
+        注意：若此前已开着其它会话，面板非空白并不代表目标已打开，
+        必须优先看标题命中。
         """
         for _ in range(5):
             time.sleep(0.6)
+            if self._chat_is_open(name):
+                return True
+        # 标题始终读不到才退而求其次：面板有内容且非目标会话也算打开
+        # （点错会话时标题会匹配到别的名字，标题优先可拦截误开）
+        for _ in range(3):
+            time.sleep(0.4)
             if self._chat_is_open(name):
                 return True
             if self._pane_has_content():
@@ -1094,12 +1225,14 @@ class WeChatGUI:
         """检测右侧面板是否打开了指定会话（标题 OCR）。
 
         微信 4.x 标题 OCR 常把首字符截掉（“文件传输助手”→“件传输助”），
-        因此不能用前 2 字匹配，需用名称中段片段（如第 2-3 字符）。
+        因此不能用前 2 字匹配，需用名称中段片段（如第 2-3 字符）。标题
+        字号小、含生僻字时原尺寸 OCR 会漏识别，需放大后再读；标题行实际
+        渲染在 y≈80-180（非顶部 15-100），OCR 区需向上/向下多留。
         """
         try:
             # 标题文本贴右面板左边缘（可能略越过侧栏边界），OCR 区向左多留
-            x0 = max(0, self.right_pane_left - 40)
-            res = self.ocr((x0, 15, self.render_w, 100))
+            x0 = max(0, self.right_pane_left - 60)
+            res = self.ocr_zoomed((x0, 0, self.render_w, 185), scale=3)
             title = ''.join(t.strip() for t, x, y, w, h in res)
             if len(name) >= 3:
                 frags = (name[1:3], name[2:4], name[-2:], name[:2])
@@ -1115,6 +1248,10 @@ class WeChatGUI:
         搜索下拉结果排布：联系人在最上方，下面是「搜索网络结果 / 搜一搜」
         等节标题。OCR 结果按 y 排序后，跳过节标题/提示行，点选视觉上
         第一条匹配名称的联系人行。
+
+        群聊的成员预览行（如「00，包含：卢立竺」）也含目标名片段，若不
+        排除会误点群聊而非联系人。群聊节标题「群聊」以下的行优先排除，
+        含「包含」的成员预览行直接跳过。
         """
         frag = name[:2]
         for _ in range(3):
@@ -1126,16 +1263,27 @@ class WeChatGUI:
             self.set_clipboard(name)
             self._input.key(VK_V, ctrl=True)
             time.sleep(0.8)
-            res = self.ocr((SIDEBAR_LEFT, int(self.render_h * 0.08),
-                            self.sidebar_right, self.render_h))
+            res = self.ocr_zoomed((SIDEBAR_LEFT, int(self.render_h * 0.08),
+                                   self.sidebar_right, self.render_h), scale=2)
             rows = sorted(res, key=lambda r: (r[2], r[1]))
+            group_section = False
             for t, x, y, w, h in rows:
                 tt = (t.strip() or '')
                 if not tt:
                     continue
+                if tt == '群聊':
+                    group_section = True
+                    continue
+                if tt.startswith('聊天记录') or tt.startswith('查看全部'):
+                    break
+                if group_section:
+                    continue
                 # 跳过“搜索/网络/搜一搜”等节标题与提示行
                 if (tt.startswith('搜索') or tt.startswith('搜一搜')
                         or '网络' in tt or '暂无' in tt):
+                    continue
+                # 群聊成员预览行，跳过以免误点群聊
+                if '包含' in tt or tt.endswith('群') or tt.endswith('群聊'):
                     continue
                 if frag in tt:
                     self.wx_click(self.origin_x + x + w // 2,
@@ -1334,6 +1482,9 @@ class WeChatGUI:
         """检测输入框文本区是否有深色像素（文字/光标），确认输入生效。
 
         box 可传入已探测好的输入框，避免连续发送时重复探测。
+
+        阈值收紧到 sum<450：空输入框的浅灰占位符约为 (200,200,200) 即
+        600，避免把占位符误判为未发送的文字导致消息重复发送。
         """
         if box is None:
             box = self.get_input_box()
@@ -1344,7 +1495,7 @@ class WeChatGUI:
         img = self._grab_screen(self._rel_to_screen(rel))
         px = img.load()
         dark = sum(1 for y in range(0, img.size[1], 2) for x in range(0, img.size[0], 2)
-                   if sum(px[x, y]) < 640)
+                   if sum(px[x, y]) < 450)
         return dark > 20
 
     # ------------------------------------------------------------------
@@ -1357,20 +1508,28 @@ class WeChatGUI:
         仍有内容则回退到 OCR 定位「发送」按钮点击。每次操作后都必须确认
         输入框文本已清空（即消息真正发出），否则重试。
 
+        关键防护：发送前若输入框本无文字，回车等于空发，必须判定失败
+        让上层重试（否则消息未发出却被误判成功）。
+
         fast=True 时仅回车 + 短等待（分段连续发送用），失败返回 False
         由 send_msg 回退到完整流程。
         """
+        box = getattr(self, '_last_input_box', None)
         if fast:
-            box = getattr(self, '_last_input_box', None)
+            if not self._input_box_has_text(box):
+                return False
             self._input.key(VK_RETURN)
             time.sleep(0.5)
             if not self._input_box_has_text(box):
                 return True
             return False
         for attempt in range(3):
+            if not self._input_box_has_text(box):
+                wxlog.debug('发送前输入框无文字，跳过空发')
+                return False
             self._input.key(VK_RETURN)
             time.sleep(1.0)
-            if not self._input_box_has_text():
+            if not self._input_box_has_text(box):
                 return True
             wxlog.debug(f'回车发送未生效（attempt={attempt}），改用「发送」按钮')
             res = self.ocr(self.send_button_region)
@@ -1384,7 +1543,7 @@ class WeChatGUI:
             if not clicked:
                 return False
             time.sleep(1.0)
-            if not self._input_box_has_text():
+            if not self._input_box_has_text(box):
                 return True
         return False
 
@@ -1527,17 +1686,21 @@ class WeChatGUI:
             wxlog.debug(f'写入 CF_HDROP 剪贴板失败：{e}')
             return False
 
-    def _paste_attachment_and_send(self, path: str) -> bool:
+    def _paste_attachment_and_send(self, path: str,
+                                   box: Optional[Tuple[int, int, int, int]] = None) -> bool:
         """聚焦输入框 → 粘贴文件 → 检测草稿就绪 → 回车发送。
 
         图片草稿为彩色像素、文件为灰色卡片。图片粘贴偶发失效，
         采用「重新聚焦 + 重新粘贴」重试循环提升可靠性。
+
+        box 可传入已探测好的输入框（连续发送附件时复用，避免重复探测）。
         """
         if not os.path.isfile(path):
             wxlog.debug(f'文件不存在：{path}')
             return False
         is_image = path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'))
-        box = self.get_input_box()
+        if box is None:
+            box = self.get_input_box()
         wxlog.debug(f'粘贴前输入框探测：{box}')
         for attempt in range(3):
             if not self.focus_input(box):
@@ -1618,10 +1781,16 @@ class WeChatGUI:
         """发送本地文件（剪贴板粘贴路线）。"""
         if not self.ensure_visible():
             return WxResponse.failure('微信窗口不可见（可能锁屏/会话断开）')
-        if who and not self._open_chat_and_settle(who):
-            return WxResponse.failure(f'无法打开会话：{who}')
+        # 会话复用：目标仍是当前已打开会话且输入框可探测时跳过 open_chat
+        # （open_chat 重扫侧栏/点击是附件发送的主要耗时点）
+        if who and not (who == getattr(self, '_current_chat', None)
+                        and self.get_input_box()):
+            if not self._open_chat_and_settle(who):
+                return WxResponse.failure(f'无法打开会话：{who}')
+            self._current_chat = who
+        box = self.get_input_box()
         before_seq = self._target_seq(who)
-        if not self._paste_attachment_and_send(path):
+        if not self._paste_attachment_and_send(path, box):
             return WxResponse.failure(f'文件发送失败：{path}')
         if verify:
             ok = self._verify_attachment_sent(path, who, before_seq)
@@ -1634,10 +1803,14 @@ class WeChatGUI:
         """发送本地图片（剪贴板粘贴路线，微信自动作为图片消息插入）。"""
         if not self.ensure_visible():
             return WxResponse.failure('微信窗口不可见（可能锁屏/会话断开）')
-        if who and not self._open_chat_and_settle(who):
-            return WxResponse.failure(f'无法打开会话：{who}')
+        if who and not (who == getattr(self, '_current_chat', None)
+                        and self.get_input_box()):
+            if not self._open_chat_and_settle(who):
+                return WxResponse.failure(f'无法打开会话：{who}')
+            self._current_chat = who
+        box = self.get_input_box()
         before_seq = self._target_seq(who)
-        if not self._paste_attachment_and_send(path):
+        if not self._paste_attachment_and_send(path, box):
             return WxResponse.failure(f'图片发送失败：{path}')
         if verify:
             ok = self._verify_attachment_sent(path, who, before_seq)
@@ -1672,10 +1845,13 @@ class WeChatGUI:
                     who = hits[0]["username"]
             fname = os.path.basename(path)
             fname_bytes = fname.encode('utf-8')
+            # 微信会自动重名文件为 名称(n).ext，匹配文件名主干
+            stem = os.path.splitext(fname)[0]
+            stem_bytes = stem.encode('utf-8')
             is_image = path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'))
             expect_type = '图片' if is_image else '文件/链接/卡片'
-            # 微信发送后 DB 异步落库，轮询最多 6s 等待新消息出现
-            deadline = time.time() + 6.0
+            # 微信发送后 DB 异步落库，文件消息落库更慢，轮询放宽到 10s
+            deadline = time.time() + (6.0 if is_image else 10.0)
             while time.time() < deadline:
                 # 优先：发送后出现了 sort_seq 更大的同类型消息（图片消息无文件名，只能靠它）
                 for m in db.get_new_messages(who, since_seq=before_seq, limit=8):
@@ -1689,6 +1865,9 @@ class WeChatGUI:
                     row = db.get_message_row(who, m.get('local_id'))
                     if row and row.get('packed_info') and isinstance(row['packed_info'], bytes):
                         if fname_bytes in row['packed_info']:
+                            return True
+                        # 兼容重命名：主干匹配 + packed_info 内同一文件（主干名出现即可）
+                        if stem_bytes in row['packed_info']:
                             return True
                 time.sleep(0.5)
         except Exception as e:
