@@ -10,7 +10,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.0.7
+> 当前版本：1.0.8
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -18,7 +18,32 @@
 
 ---
 
+## 🤝 致谢
+
+> 感谢 [vesio](https://github.com/vesio) 在 [issue #1](https://github.com/fanyuantaier/wechatauto-replica/issues/1) 提供微信 4.1.12 的 UIA 控件树代码与思路，促成了 v1.0.8 的 UIA 混合驱动。
+
+---
+
 ## 版本记录
+
+### v1.0.8（2026-08-13）
+- 🎉 **特别感谢 [vesio](https://github.com/vesio)**：在 issue #1 中提供了微信 4.1.12 可出 UIA 控件树的代码与调试思路，本版 UIA 混合驱动由此而来；
+- **UIA 混合驱动**（`uia_driver.py`，微信 4.1.12.26 实测）：
+  - 新增 `WeChatUIA` 引擎：冷启动时 `Qt51514QWindowIcon` 只是空壳（Qt
+    无障碍门未激活），通过写 Weixin.dll 内的 Qt accessibility gate
+    （RVA 扫描定位）**热激活**后，锚点变为 `mmui::MainWindow`，搜索框
+    `mmui::XValidatorTextEdit` / 搜索下拉 `search_list` / 输入框
+    `chat_input_field` 全部可用；
+  - 发送链路全部走 UIA：搜索下拉选人（`search_item_*`）打开会话 →
+    `chat_input_field` 直接输入 + 回车发送，`current_chat` 校验防误配，
+    无 OCR 抖动；Windows 冷状态热激活后 UIA 树保持可用；
+  - `guia.py` 集成混合路径：`_get_uia()` 惰性启用，`open_chat` /
+    `send_msg` **UIA 优先、OCR 兜底**——UIA 树不可用（版本变更新增 RVA）
+    或失败时自动降级到坐标 + 放大 OCR 方案，首次失败本次会话内不再重试。
+  - 实测：`send_msg('文件传输助手')` 10.2s、`send_msg('卢立竺')` 13.2s
+    均走 UIA 并数据库确认成功（含 verify）；UIA 对生僻字会话名不再依赖
+    OCR 识别。
+- 新增依赖：`uiautomation`（UIA 客户端库）。
 
 ### v1.0.7（2026-08-13）
 

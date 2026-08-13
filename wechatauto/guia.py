@@ -392,6 +392,8 @@ class WeChatGUI:
         self.pid = self._get_pid(self.main_hwnd)
         self._current_chat = None  # 最近打开的会话名，用于连续发送时复用
         self._last_input_box = None  # 最近一次成功发送的输入框位置，连续发送复用
+        self._uia = None  # UIA 引擎（惰性创建，仅当可用时启用）
+        self._uia_tried = False
         # 布局校准：显式 calibrate=True 强制重校准；否则加载本机已校准配置，
         # 没有配置则自动校准一次（OCR 可用时），实现「跑一次永久兼容」。
         if not calibrate:
@@ -1138,13 +1140,38 @@ class WeChatGUI:
         except Exception:
             return False
 
+    def _get_uia(self):
+        """惰性创建并复用 UIA 引擎；不可用时返回 None（由调用方降级 OCR）。
+
+        混合驱动：UIA 树需热激活（写 Weixin.dll 的 Qt accessibility byte）。
+        首次尝试失败则本次会话内不再重试（避免每条消息都等超时）。
+        """
+        if self._uia_tried:
+            return self._uia
+        self._uia_tried = True
+        try:
+            from wechatauto.uia_driver import WeChatUIA
+            eng = WeChatUIA()
+            if eng.ensure_window():
+                self._uia = eng
+                wxlog.info('已启用 UIA 驱动（混合路径：UIA 优先，OCR 兜底）')
+            else:
+                wxlog.info('UIA 树不可用，本次会话使用 OCR 驱动')
+        except Exception as e:
+            wxlog.debug('初始化 UIA 引擎失败：%s', e)
+        return self._uia
+
     def open_chat(self, name: str, exact: bool = False) -> bool:
-        """打开指定会话的聊天窗口（优先点击会话，其次走搜索框）。
+        """打开指定会话的聊天窗口（优先 UIA，其次 OCR 侧栏/搜索）。
 
         微信 4.x 行为：点侧栏会话在主窗右侧面板打开；搜索下拉点联系人则
         打开独立聊天窗口（标题“昵称与X的聊天记录”）。本方法两条路都处理，
         打开后把 GUI 操作目标切到对应窗口，并验证会话真正打开。
         """
+        uia = self._get_uia()
+        if uia is not None and uia.open_chat(name):
+            self._current_chat = name
+            return True
         if not self.ensure_visible():
             wxlog.warning('无法将微信窗口置于前台，尝试继续操作')
         # 优先：右侧面板当前已打开目标会话 → 直接成功
@@ -1570,6 +1597,21 @@ class WeChatGUI:
                 and self.input_text(text, box=self._last_input_box, fast=True)
                 and self.click_send(fast=True)):
             return WxResponse.success(f'消息已发送：{text}', data={'content': text})
+        # UIA 路径：热激活后可直接输入+回车发送，无 OCR 抖动，最快。
+        uia = self._get_uia()
+        if uia is not None:
+            if not who or uia.current_chat() == who or uia.open_chat(who):
+                if uia.send_text(text):
+                    if not verify:
+                        return WxResponse.success(f'消息已发送：{text}', data={'content': text})
+                    if self._verify_sent(text, who):
+                        return WxResponse.success(f'消息已发送并确认：{text}', data={'content': text})
+                    wait_until = time.time() + 8
+                    while time.time() < wait_until:
+                        time.sleep(1.0)
+                        if self._verify_sent(text, who):
+                            return WxResponse.success(f'消息已发送并确认：{text}', data={'content': text})
+                    return WxResponse.failure('消息已操作发送，但数据库未确认', data={'content': text})
         if not self.ensure_visible():
             return WxResponse.failure('微信窗口不可见（可能锁屏/会话断开）')
         self._last_input_box = None
