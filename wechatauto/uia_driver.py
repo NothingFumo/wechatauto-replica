@@ -636,6 +636,42 @@ class WeChatUIA:
         except Exception:
             pass
 
+    @staticmethod
+    def _set_cursor(x: int, y: int) -> None:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetCursorPos(int(x), int(y))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _mouse_wheel(delta: int) -> None:
+        try:
+            import ctypes
+            ctypes.windll.user32.mouse_event(0x0800, 0, 0, int(delta), 0)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _left_click() -> None:
+        try:
+            import ctypes
+            ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)  # down
+            time.sleep(0.05)
+            ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)  # up
+        except Exception:
+            pass
+
+    @staticmethod
+    def _right_click() -> None:
+        try:
+            import ctypes
+            ctypes.windll.user32.mouse_event(0x0008, 0, 0, 0, 0)  # down
+            time.sleep(0.05)
+            ctypes.windll.user32.mouse_event(0x0010, 0, 0, 0, 0)  # up
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ 控件定位
     def _search_box(self, win):
         for kw in (dict(ClassName=SEARCH_EDIT_CLASS, Name=SEARCH_EDIT_NAME),
@@ -712,9 +748,32 @@ class WeChatUIA:
         return pruned
 
     # ------------------------------------------------------------------ 高层动作
+    @staticmethod
+    def _resolve_search_keyword(keyword: str) -> List[str]:
+        """把账号/username 解析成微信搜索框能命中的关键词列表。
+
+        微信搜索框不认 wxid（系统账号），只认昵称/备注/微信号(alias)。
+        优先返回直接命中词（原样），再尝试 DB 映射：username 精确 → 昵称/备注/微信号。
+        """
+        candidates = [keyword]
+        try:
+            from wechatauto.db import WeChatDB
+            db = WeChatDB()
+            for hit in db.search_contact(keyword):
+                for k in (hit.get("remark"), hit.get("nick_name")):
+                    if k and k not in candidates:
+                        candidates.append(k)
+        except Exception:
+            pass
+        return candidates
+
     def open_chat(self, keyword: str, index: Optional[int] = None,
                   section: Optional[str] = None, retries: int = 2) -> bool:
-        """搜索并打开联系人/群聊，成功后校验输入框 Name。返回是否成功。"""
+        """搜索并打开联系人/群聊，成功后校验输入框 Name。返回是否成功。
+
+        传入 username/wxid 时自动映射为昵称/备注/微信号再搜索（微信搜索框
+        不认 wxid）。搜索框残留会影响命中，每次打开前先清空重试。
+        """
         if not self.ensure_window():
             return False
         win = self._win
@@ -722,14 +781,22 @@ class WeChatUIA:
         if box is None:
             return False
 
+        keywords = self._resolve_search_keyword(keyword)
         results = []
-        for attempt in range(max(1, retries)):
-            self._paste_into(box, keyword, clear=True)
-            time.sleep(0.8)
-            results = self._collect_results(keyword)
-            if results:
+        used_kw = keyword
+        for kw in keywords:
+            got = False
+            for attempt in range(max(1, retries)):
+                self._paste_into(box, kw, clear=True)
+                time.sleep(0.8)
+                got = self._collect_results(kw)
+                if got:
+                    break
+                time.sleep(0.4)
+            if got:
+                results = got
+                used_kw = kw
                 break
-            time.sleep(0.4)
 
         if not results:
             return False
@@ -745,7 +812,7 @@ class WeChatUIA:
                 results = filtered
         elif len(results) > 1:
             # 有精确名称命中时优先精确命中，否则用第一个
-            exact = [r for r in results if r["name"] == keyword]
+            exact = [r for r in results if r["name"] == used_kw]
             if exact:
                 results = exact
 
@@ -754,7 +821,7 @@ class WeChatUIA:
         time.sleep(0.7)
 
         name = self.current_chat()
-        if name and (name == chosen["name"] or name == keyword):
+        if name and (name == chosen["name"] or name == used_kw):
             return True
         return False
 
@@ -781,6 +848,148 @@ class WeChatUIA:
             return False
         return self.send_text(text)
 
+    def voice_call(self, who: Optional[str] = None, video: bool = False) -> bool:
+        """发起语音/视频通话（点击标题栏通话按钮 → 选择菜单项）。
+
+        微信 4.x 标题栏暴露 ``mmui::ChatVoIPView`` 下的 ``voip_button``
+        （aid=voip_button）。点击后弹出 ``mmui::XMenuView`` 菜单，含
+        「语音通话」「视频通话」两个 ``MenuItemControl``（aid=XMenuItem）；
+        需再点击目标菜单项才真正发起通话。video=True 时选「视频通话」，
+        否则选「语音通话」。
+        """
+        if not self.ensure_window():
+            return False
+        if who and not self.current_chat() == who:
+            if not self.open_chat(who):
+                return False
+        win = self._win
+        if win is None:
+            return False
+        # voip_button 控件树会动态重建，需重试定位
+        btn = None
+        for _ in range(6):
+            try:
+                btn = win.ButtonControl(AutomationId="voip_button")
+                if btn.Exists(0.6, 0.2):
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if not btn or not btn.Exists(0):
+            return False
+        try:
+            btn.Click()
+            time.sleep(0.8)
+        except Exception:
+            return False
+        # 菜单里选择 语音/视频 通话项
+        target_name = "视频通话" if video else "语音通话"
+        for _ in range(4):
+            try:
+                item = win.MenuItemControl(AutomationId="XMenuItem", Name=target_name)
+                if item.Exists(0.5, 0.2):
+                    item.Click()
+                    time.sleep(0.5)
+                    return True
+            except Exception:
+                pass
+            # 菜单可能延迟出现或树重建，重试
+            time.sleep(0.4)
+        return False
+
+    def _find_friend_row(self):
+        """找一条对方（friend）消息行控件，供右键头像触发拍一拍。
+
+        消息行 rect 是全宽，方向需按行内内容重心判断（friend 内容靠左，
+        self 靠右）。返回 friend 消息行控件。
+        """
+        lst = self._message_list()
+        if lst is None:
+            return None
+        try:
+            from PIL import ImageGrab as IG
+            import numpy as np
+        except Exception:
+            return None
+        # 可视区（消息列表内部矩形），过滤掉滚出可视区的行
+        lr = lst.BoundingRectangle
+        vis_top, vis_bottom = lr.top, lr.bottom
+        # 优先文字行，其次其他内容行（动画表情/图片/引用等）
+        rows = list(lst.GetChildren())
+        for ch in sorted(rows, key=lambda c: c.ClassName != "mmui::ChatTextItemView"):
+            try:
+                cn = ch.ClassName or ""
+                if not cn.startswith("mmui::Chat"):
+                    continue
+                if cn in ("mmui::ChatItemView", "mmui::ChatSystemInfoItemView"):
+                    continue
+                r = ch.BoundingRectangle
+                if r.bottom - r.top < 40:
+                    continue
+                # 行必须在可视区内（含部分露出），排除被遮挡/滚出的行
+                if r.top >= vis_bottom or r.bottom <= vis_top:
+                    continue
+                img = IG.grab(bbox=(r.left, r.top, r.right, r.bottom))
+                arr = np.array(img.convert("RGB"))
+                bg = (arr.max(axis=2) > 235) & ((arr.max(axis=2) - arr.min(axis=2)) < 22)
+                colc = (~bg).sum(axis=0)
+                total = int(colc.sum())
+                if total < 20:
+                    continue
+                weighted = sum(x * colc[x] for x in range(len(colc))) / total
+                if weighted < arr.shape[1] * 0.5:
+                    return ch
+            except Exception:
+                continue
+        return None
+
+    def poke(self, who: Optional[str] = None) -> bool:
+        """对联系人发起「拍一拍」（右键头像 → 点击拍一拍菜单项）。
+
+        微信 4.x 的拍一拍只能通过右键聊天中对方头像触发，菜单为自绘
+        不暴露 UIA；因此用「右键头像 + 全屏 OCR 定位拍一拍文字」实现。
+        需要 winsdk OCR 可用。
+        """
+        if not self.ensure_window():
+            return False
+        if who and not self.current_chat() == who:
+            if not self.open_chat(who):
+                return False
+        row = self._find_friend_row()
+        if row is None:
+            return False
+        try:
+            r = row.BoundingRectangle
+        except Exception:
+            return False
+        # 头像位于消息行最左侧约 40-50px 处
+        ax = r.left + 70
+        ay = (r.top + r.bottom) // 2
+        try:
+            from wechatauto.guia import ScreenOCR
+            import PIL.ImageGrab as IG
+        except Exception:
+            return False
+        for attempt in range(2):
+            self._set_cursor(ax, ay)
+            time.sleep(0.2)
+            self._right_click()
+            time.sleep(1.0)
+            img = IG.grab()
+            res = ScreenOCR.recognize(img)
+            for text, x, y, w, h in res:
+                t = (text or "").replace(" ", "")
+                if "拍一拍" in t or t == "拍一" or t.startswith("拍一"):
+                    # 点击该文字中心
+                    cx = x + w // 2
+                    cy = y + h // 2
+                    self._set_cursor(cx, cy)
+                    time.sleep(0.2)
+                    self._left_click()
+                    time.sleep(0.5)
+                    return True
+        return False
+
     # ------------------------------------------------------------------ 剪贴板粘贴
     def _paste_into(self, ctrl, text: str, clear: bool = True) -> None:
         ctrl.Click()
@@ -795,6 +1004,112 @@ class WeChatUIA:
             ctrl.SendKeys("{Ctrl}v", waitTime=0.05)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ 消息列表定位
+    def _message_list(self, win=None):
+        """定位当前会话的消息列表控件（RecyclerListView / chat_message_list）。"""
+        win = win or self._win
+        if win is None:
+            return None
+
+        def walk(c, d=0):
+            if d > 15:
+                return None
+            for ch in c.GetChildren():
+                try:
+                    cn = ch.ClassName or ""
+                except Exception:
+                    continue
+                if cn == "mmui::RecyclerListView":
+                    return ch
+                r = walk(ch, d + 1)
+                if r is not None:
+                    return r
+            return None
+
+        return walk(win)
+
+    def find_in_message_list(self, predicate, match_last: bool = False,
+                             max_scrolls: int = 40) -> Optional[Tuple]:
+        """在消息列表中按谓词查找消息控件，返回 (className, name, rect)。
+
+        RecyclerListView 是虚拟化列表，只实例化可视区约 12 条；历史消息需
+        滚动。ScrollPattern 不可用（返回空），改用鼠标滚轮驱动列表滚动。
+        match_last=True 时滚到底后从底部向上找，用于取最新表情/消息。
+        """
+        lst = self._message_list()
+        if lst is None:
+            return None
+
+        def scroll(direction: str, times: int = 1) -> None:
+            # direction: 'up'=滚向最新(底部), 'down'=滚向历史(更早)
+            # 实测（微信4.1.12.26）：open_chat 后消息列表定位在底部(最新)，
+            # 滚轮 +120 滚向历史(更早)，-120 滚向最新。
+            try:
+                r = lst.BoundingRectangle
+                cx = (r.left + r.right) // 2
+                cy = (r.top + r.bottom) // 2
+                self._set_cursor(cx, cy)
+                delta = -120 if direction == 'up' else 120
+                for _ in range(times):
+                    self._mouse_wheel(delta)
+                    time.sleep(0.2)
+            except Exception:
+                pass
+
+        def visible():
+            out = []
+            for ch in lst.GetChildren():
+                try:
+                    cn = ch.ClassName or ""
+                    nm = ch.Name or ""
+                    if cn == "mmui::ChatItemView":  # 时间分隔行跳过
+                        continue
+                    if predicate(cn, nm):
+                        out.append((cn, nm, ch))
+                except Exception:
+                    continue
+            return out
+
+        # 列表定位在底部(最新)。match_last 直接取当前可视区最匹配的一条
+        # （最新消息已实例化），没有才向上(滚向历史)翻找。
+        if match_last:
+            got = visible()
+            if got:
+                ch = got[-1][2]
+                try:
+                    r = ch.BoundingRectangle
+                    return (got[-1][0], got[-1][1], r)
+                except Exception:
+                    pass
+            for _ in range(max_scrolls):
+                got = visible()
+                if got:
+                    ch = got[-1][2]
+                    try:
+                        r = ch.BoundingRectangle
+                        return (got[-1][0], got[-1][1], r)
+                    except Exception:
+                        pass
+                scroll('down', 2)  # 滚向历史找更早匹配
+            return None
+
+        # 非 match_last：从底部(最新)向历史逐屏扫描
+        seen = set()
+        for _ in range(max_scrolls):
+            for cn, nm, ch in visible():
+                try:
+                    r = ch.BoundingRectangle
+                    key = (r.left, r.top, r.right, r.bottom)
+                except Exception:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                if predicate(cn, nm):
+                    return (cn, nm, r)
+            scroll('down', 2)
+        return None
 
     # ------------------------------------------------------------------ 调试
     def dump(self, max_depth: int = 16, max_nodes: int = 1500):

@@ -10,7 +10,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.0.8
+> 当前版本：1.0.9
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -25,6 +25,28 @@
 ---
 
 ## 版本记录
+
+### v1.0.9（2026-08-14）
+
+- **open_chat 账号/微信号搜索修复**（`uia_driver.py`）：微信搜索框不认 wxid
+  （系统账号），`open_chat` 传入 username 时自动通过本地 DB 映射为昵称/备注/
+  微信号再搜索（`_resolve_search_keyword`），并清空搜索框残留重试；
+  实测 `open_chat('wxid_sb9or2x9zxj012')` 成功。
+- **UIA 表情包精确读取**（`msgs/mtype.py` + `uia_driver.py`）：热激活后消息
+  列表暴露 `mmui::RecyclerListView`，新增 `find_in_message_list()` 用鼠标滚轮
+  驱动虚拟化列表滚动，按 ClassName/Name 定位表情行并取 BoundingRectangle
+  精确坐标；`EmojiMessage.capture()` 优先走 UIA 定位 + 方向感知气泡裁剪
+  （`_crop_bubble_from_row`），实测 1.1s 裁出 271×271 表情，替代原先
+  「截图全消息区 + 连通域猜气泡」的脆弱方案；失败自动回退原连通域逻辑。
+- **语音通话**（`uia_driver.voice_call` + `Chat.VoiceCall`）：标题栏暴露
+  `mmui::ChatVoIPView.voip_button`（Name=语音通话），控件树动态重建需重试
+  定位；video=True 尝试找视频通话按钮（当前版本未暴露，通常失败）。
+- **拍一拍**（`uia_driver.poke` + `Chat.Poke`）：微信 4.x 拍一拍只能通过
+  右键对方头像触发，菜单为自绘不暴露 UIA；实现为「内容重心定位 friend
+  消息行 → 右键头像 → 全屏 OCR 定位「拍一拍」→ 点击」，实测 3.2s 发出
+  （网络正常时对方收到，网络异常时微信显示失败提示，链路本身正确）。
+- `EmojiMessage.capture()` / `voice_call` / `poke` 失败均自动回退或返回
+  WxResponse 失败，不影响既有 OCR 发送路径。
 
 ### v1.0.8（2026-08-13）
 - 🎉 **特别感谢 [vesio](https://github.com/vesio)**：在 issue #1 中提供了微信 4.1.12 可出 UIA 控件树的代码与调试思路，本版 UIA 混合驱动由此而来；
@@ -155,15 +177,17 @@
 | 多账号管理 | ✅ 已完成并验证 | `list_accounts()` + `account=` 参数 |
 | 读取会话列表 | ✅ 已完成并验证 | 同上 |
 | 搜索联系人 | ✅ 已完成并验证 | 同上 |
-| 发送消息 | ✅ 已完成并验证 | 坐标+OCR（`wechatauto/guia.py`） |
+| 发送消息 | ✅ 已完成并验证 | UIA + 坐标+OCR 混合（`wechatauto/guia.py`） |
 | 发送文件/图片/回复/艾特 | ✅ 已完成并验证 | 剪贴板 CF_HDROP + OCR |
-| UI 自动化（UIAutomation） | ⚠️ 受限 | 微信 4.1.12+ 聊天区域自绘渲染，不暴露无障碍节点 |
+| 语音通话 / 拍一拍 | ✅ 已完成并验证 | UIA 按钮 + OCR 菜单（`Chat.VoiceCall` / `Chat.Poke`） |
+| UI 自动化（UIAutomation） | ✅ 热激活后可用 | 写 Weixin.dll Qt accessibility gate，物化 `mmui::*` 树 |
 
-**结论**：微信 4.1.x 聊天界面使用自绘渲染（`MMUIRenderSubWindow*`，不同版本
-后缀不同，如 `MMUIRenderSubWindowHW` / `MMUIRenderSubWindow`），对
-UIAutomation / MSAA 完全不暴露内容，原 wxauto 的 UI 方案失效。本项目采用
-「**本地数据库解密**」读取（已全链路验证）、「**坐标 + OCR**」发送
-（已实测：文本/文件/图片发送稳定，回复/艾特见 `demo_reply_at.py`）。
+**结论**：微信 4.1.x 聊天界面使用自绘渲染（`MMUIRenderSubWindow*`），冷启动
+对 UIAutomation 只暴露 `Qt51514QWindowIcon` 空壳（原 wxauto 的 UI 方案因此
+失效）。本项目通过**热激活 Qt accessibility gate**（写 Weixin.dll 内读屏
+标志位，从 `qt.accessibility.core` 引用扫描 RVA）物化 `mmui::*` UIA 树，
+实现发送/语音通话/拍一拍等操作（UIA 优先、坐标+OCR 兜底）；消息读取仍走
+「**本地数据库解密**」（已全链路验证）。
 
 ---
 

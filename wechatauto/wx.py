@@ -2,15 +2,15 @@
 
 实现说明
 ========
-早期版本基于 UIAutomation（``mmui::*`` 控件树）驱动微信；但当前
-4.1.x 客户端使用 QtQuick 自绘界面，UIA 树中不暴露任何 ``mmui::``
-控件（只有 ``Qt51514QWindowIcon`` + ``MMUIRenderSubWindow*`` 渲染子窗口，
-后缀随版本不同，子树为空），
-因此 UIA 路线已不可用。
+早期版本基于 UIAutomation（``mmui::*`` 控件树）驱动微信。当前 4.1.x 客户端
+冷启动时 UIA 树只暴露 ``Qt51514QWindowIcon`` + ``MMUIRenderSubWindow*`` 空壳
+（原 wxauto UI 方案因此失效）；通过热激活 Qt accessibility gate（见
+:mod:`wechatauto.uia_driver`）后可物化 ``mmui::*`` 完整控件树。
 
 本模块把 :class:`WeChat` / :class:`Chat` 的公共 API 重新实现为
-「坐标 + OCR（:class:`wechatauto.guia.WeChatGUI`）+ 本地数据库
-（:class:`wechatauto.db.WeChatDB`）」技术栈，**保持方法签名不变**，
+「UIA 优先（:class:`wechatauto.uia_driver.WeChatUIA`）+ 坐标/OCR
+（:class:`wechatauto.guia.WeChatGUI`）+ 本地数据库
+（:class:`wechatauto.db.WeChatDB`）」混合技术栈，**保持方法签名不变**，
 原有调用方代码无需改动即可运行。
 
 :class:`Listener` 抽象类保留仅为向后兼容（已由 :mod:`wechatauto.db` 的
@@ -262,6 +262,43 @@ class Chat:
     def Close(self) -> None:
         """关闭聊天（GUI 模式下无独立窗口，置前即可）。"""
         self._gui.bring_to_front()
+
+    @uilock
+    def VoiceCall(self, who: str = None, video: bool = False) -> WxResponse:
+        """发起语音/视频通话。
+
+        Args:
+            who: 通话对象，不指定则使用当前聊天对象
+            video: True 尝试视频通话（当前版本未暴露视频按钮，通常失败）
+
+        Returns:
+            WxResponse
+        """
+        target = who or self.who
+        uia = self._gui._get_uia()
+        if uia is None:
+            return WxResponse.failure('UIA 驱动不可用，无法发起通话')
+        if not uia.voice_call(target, video=video):
+            return WxResponse.failure('通话发起失败（可能未打开会话或控件不可用）')
+        return WxResponse.success(f'已发起通话：{target}')
+
+    @uilock
+    def Poke(self, who: str = None) -> WxResponse:
+        """对联系人发起「拍一拍」（右键头像 → 点击拍一拍）。
+
+        Args:
+            who: 拍一拍对象，不指定则使用当前聊天对象
+
+        Returns:
+            WxResponse
+        """
+        target = who or self.who
+        uia = self._gui._get_uia()
+        if uia is None:
+            return WxResponse.failure('UIA 驱动不可用，无法发起拍一拍')
+        if not uia.poke(target):
+            return WxResponse.failure('拍一拍失败（未找到对方消息或菜单不可识别）')
+        return WxResponse.success(f'已对 {target} 拍一拍')
 
     # -- 信息 -------------------------------------------------------------
 

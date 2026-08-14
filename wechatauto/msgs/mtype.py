@@ -139,6 +139,47 @@ class EmojiMessage(BaseMessage):
             wxlog.warning('表情截图失败：会话名称为空')
             return None
         try:
+            # ---- UIA 优先路径：直接定位表情消息行的精确屏幕坐标 ----
+            # 热激活后消息列表暴露 mmui::ChatBubbleReferItemView（Name='动画表情'）
+            # / ChatBubbleItemView 等控件，BoundingRectangle 即精确行坐标，
+            # 替代「截图全消息区+连通域猜气泡」的脆弱裁剪。
+            uia_path = None
+            try:
+                eng = gui._get_uia()
+                if eng is not None and eng.ensure_window():
+                    if not eng.current_chat() == who:
+                        eng.open_chat(who)
+                    time.sleep(0.6)
+                    found = eng.find_in_message_list(
+                        lambda cn, nm: (nm == '动画表情'
+                                        or (cn == 'mmui::ChatBubbleItemView'
+                                            and '[动画表情' in nm)),
+                        match_last=True, max_scrolls=60)
+                    if found:
+                        cn, nm, rect = found
+                        # 消息行是全宽（含头像/空白），按方向裁出气泡本身
+                        attr = getattr(self, 'attr', 'friend')
+                        row_img = gui._grab_screen(
+                            (rect.left, rect.top, rect.right, rect.bottom))
+                        bubble = self._crop_bubble_from_row(
+                            row_img, want_left=(attr != 'self'))
+                        if bubble is None or min(bubble.size) < 50:
+                            bubble = self._content_bbox_crop(row_img)
+                        if bubble is not None and min(bubble.size) >= 50:
+                            uia_path = bubble
+            except Exception as e:
+                wxlog.debug('UIA 表情定位失败，退回连通域方案：%s', e)
+            if uia_path is not None:
+                save_dir = save_dir or os.path.join(
+                    tempfile.gettempdir(), PROJECT_NAME, 'emoji')
+                os.makedirs(save_dir, exist_ok=True)
+                path = os.path.join(
+                    save_dir, 'emoji_%d.png' % int(time.time() * 1000))
+                uia_path.save(path)
+                print(f'[CAP] uia attr={getattr(self, "attr", "?")} '
+                      f'crop={uia_path.size}')
+                return path
+
             # 会话已打开（主窗面板或独立聊天窗口）时跳过 open_chat：
             # 重复 open_chat 会刷新消息列表/切换窗口，使消息控件失效。
             # 注意 _find_chat_window 未找到时返回 0 而非 None，需转 bool。
@@ -233,6 +274,88 @@ class EmojiMessage(BaseMessage):
             y0 = max(0, miny - pad)
             x1 = min(w, maxx + pad + 1)
             y1 = min(h, maxy + pad + 1)
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                return None
+            return img.crop((x0, y0, x1, y1))
+        except Exception:
+            return None
+
+    def _crop_bubble_from_row(self, img, want_left: bool = True) -> Optional[Any]:
+        """从 UIA 定位到的整行截图里按方向裁出气泡内容。
+
+        want_left=True 取左侧（对方）气泡，False 取右侧（自己）气泡。
+        表情行含头像与两侧空白，先按方向定位气泡起始列，再裁到内容边界。
+        """
+        try:
+            w, h = img.size
+            px = img.load()
+            content_cols = []
+            for x in range(0, w, 2):
+                cnt = 0
+                for y in range(0, h, 3):
+                    p = px[x, y]
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 2:
+                    content_cols.append(x)
+            if not content_cols:
+                return None
+            # 头像约 40-50px，按方向定位气泡：
+            # want_left(对方发) 气泡在左侧头像之后；False(自己发) 气泡在右侧。
+            groups = []
+            cur = [content_cols[0]]
+            for x in content_cols[1:]:
+                if x - cur[-1] <= 6:
+                    cur.append(x)
+                else:
+                    groups.append(cur)
+                    cur = [x]
+            groups.append(cur)
+            # 过滤过窄毛边（<10px 视为滚动条/噪点）
+            groups = [g for g in groups if g[-1] - g[0] >= 10]
+            if not groups:
+                return None
+            if want_left:
+                # 左侧气泡：从头像右侧找第一个宽组
+                bubble = groups[0]
+                if groups[0][0] < w * 0.15 and len(groups) > 1:
+                    bubble = groups[1]
+            else:
+                # 右侧气泡：取最右侧的宽组
+                bubble = groups[-1]
+            if not bubble:
+                return None
+            x0 = bubble[0]
+            x1 = bubble[-1]
+            # y 裁剪到内容边界
+            content_rows = []
+            for y in range(0, h, 2):
+                cnt = 0
+                for x in range(x0, x1 + 1, 3):
+                    p = px[x, y]
+                    if len(p) >= 3:
+                        r, g, b = p[0], p[1], p[2]
+                    else:
+                        r = g = b = p
+                    mxv = max(r, g, b)
+                    mnv = min(r, g, b)
+                    if not (mxv > 235 and (mxv - mnv) < 22):
+                        cnt += 1
+                if cnt > 0:
+                    content_rows.append(y)
+            if not content_rows:
+                return None
+            pad = 4
+            x0 = max(0, x0 - pad)
+            x1 = min(w, x1 + pad + 1)
+            y0 = max(0, content_rows[0] - pad)
+            y1 = min(h, content_rows[-1] + pad + 1)
             if x1 - x0 < 8 or y1 - y0 < 8:
                 return None
             return img.crop((x0, y0, x1, y1))
