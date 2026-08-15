@@ -134,8 +134,16 @@ class MediaDownloader:
         except OSError:
             pass
 
-    def _scan_aes_key(self) -> Optional[str]:
-        """从 Weixin.exe 进程内存扫描 16 字符 ASCII 密钥，用密文反测"""
+    def _scan_aes_key(self, monitor: bool = False,
+                      monitor_timeout: float = 120.0) -> Optional[str]:
+        """从 Weixin.exe 进程内存扫描 16 字符 ASCII 密钥，用密文反测。
+
+        单个匹配串滑动测试所有 16 字符子串，避免密钥在长串中间时漏掉。
+
+        微信 4.x 的图片 AES 密钥仅在查看图片大图时临时加载进内存，驻留约
+        数分钟后释放。若一次性扫描未命中且 ``monitor=True``，则持续轮询
+        等待密钥出现（期间提示用户去微信点开一张图片看大图）。
+        """
         probe = self._probe_ct()
         if not probe:
             return None
@@ -153,41 +161,74 @@ class MediaDownloader:
                 return buf.raw[: br.value]
             return None
 
-        for pid in pids:
-            h = k32.OpenProcess(0x0010 | 0x0400, False, pid)
-            if not h:
-                continue
+        def _test_candidates(buf: bytes):
+            for m in AES16_RE.finditer(buf):
+                group = m.group()
+                if len(group) == 16:
+                    yield group
+                    continue
+                for s in range(len(group) - 15):
+                    yield group[s: s + 16]
+
+        def _try_key(key: bytes):
             try:
-                addr = 0
-                while True:
-                    mbi = MBI()
-                    r = k32.VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi))
-                    if r == 0:
-                        break
-                    if (
-                        mbi.State == 0x1000
-                        and (mbi.Protect & 0xFF) & 0xE6
-                        and not (mbi.Protect & 0x100)
-                        and 0 < mbi.RegionSize < 0x2000000
-                    ):
-                        buf = read_mem(h, mbi.BaseAddress or 0, mbi.RegionSize)
-                        if buf:
-                            for m in AES16_RE.finditer(buf):
-                                for s in (0, len(m.group()) - 16):
-                                    key = m.group()[s: s + 16]
-                                    try:
-                                        from cryptography.hazmat.primitives.ciphers import (
-                                            Cipher, algorithms, modes,
-                                        )
-                                        pt = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
-                                        out = pt.update(probe) + pt.finalize()
-                                    except Exception:
-                                        continue
-                                    if _jpeg_like(out):
+                from cryptography.hazmat.primitives.ciphers import (
+                    Cipher, algorithms, modes,
+                )
+                pt = Cipher(algorithms.AES(key), modes.ECB()).decryptor()
+                out = pt.update(probe) + pt.finalize()
+            except Exception:
+                return False
+            return _jpeg_like(out)
+
+        def _scan_once() -> Optional[str]:
+            # 保持微信进程原顺序扫描（主进程在 _find_weixin_pids 中靠前，
+            # 密钥命中率高；不要按内存排序——GetProcessMemoryInfo 结构体
+            # 大小传错会全为 0，reverse 排序反而把主进程排到最后，错过窗口）
+            for pid in pids:
+                h = k32.OpenProcess(0x0010 | 0x0400, False, pid)
+                if not h:
+                    continue
+                try:
+                    addr = 0
+                    while True:
+                        mbi = MBI()
+                        r = k32.VirtualQueryEx(h, ctypes.c_void_p(addr), ctypes.byref(mbi), ctypes.sizeof(mbi))
+                        if r == 0:
+                            break
+                        if (
+                            mbi.State == 0x1000
+                            and (mbi.Protect & 0xFF) & 0xE6
+                            and not (mbi.Protect & 0x100)
+                            and 0 < mbi.RegionSize < 0x2000000
+                        ):
+                            buf = read_mem(h, mbi.BaseAddress or 0, mbi.RegionSize)
+                            if buf:
+                                for key in _test_candidates(buf):
+                                    if _try_key(key):
                                         return key.decode()
-                    addr = (mbi.BaseAddress or 0) + mbi.RegionSize
-            finally:
-                k32.CloseHandle(h)
+                        addr = (mbi.BaseAddress or 0) + mbi.RegionSize
+                finally:
+                    k32.CloseHandle(h)
+            return None
+
+        # 一次性扫描
+        found = _scan_once()
+        if found or not monitor:
+            return found
+
+        # 监控模式：持续轮询，等待用户看图后密钥进入内存
+        print(
+            "未在微信进程内存中找到图片 AES 密钥。\n"
+            "请现在打开微信，进入任意聊天，点击一张图片查看大图，\n"
+            f"本程序将在 {monitor_timeout:.0f} 秒内自动捕获密钥..."
+        )
+        start = time.time()
+        while time.time() - start < monitor_timeout:
+            time.sleep(2.0)
+            found = _scan_once()
+            if found:
+                return found
         return None
 
     def _derive_xor_key(self, dat_path: str) -> int:
@@ -213,6 +254,8 @@ class MediaDownloader:
         密钥来源优先级：显式注入 image_key → 本地缓存 → 进程内存扫描。
         内存扫描命中后会持久化，下次启动免扫。AES 密钥是账户级稳定密钥，
         但仅在微信查看图片时驻留内存，故首次需在微信打开过图片后运行。
+        扫描失败时会自动进入监控模式，提示去微信点开一张图片看大图，
+        密钥进入内存后自动捕获并持久化。
         """
         if self._img_key and not refresh:
             return self._img_key
@@ -227,7 +270,7 @@ class MediaDownloader:
         if not aes_key:
             aes_key = self._load_persisted_key()
         if not aes_key:
-            aes_key = self._scan_aes_key()
+            aes_key = self._scan_aes_key(monitor=True)
             if aes_key:
                 self._persist_key(aes_key)
         if not aes_key:
@@ -273,7 +316,7 @@ class MediaDownloader:
         cached = self._load_persisted_key()
         if cached:
             return cached
-        key = self._scan_aes_key()
+        key = self._scan_aes_key(monitor=True)
         if key:
             self._persist_key(key)
         return key
@@ -289,8 +332,9 @@ class MediaDownloader:
             aes_key = self._resolve_aes_key()
             if not aes_key:
                 raise RuntimeError(
-                    "无法获取图片 AES 密钥：请传入 image_key 参数，或保持微信登录"
-                    "并打开过图片后调用 detect_image_key()"
+                    "无法获取图片 AES 密钥：请保持微信登录，并先在微信聊天中"
+                    "打开（点击查看大图）任意一张图片，再重试 detect_image_key()；"
+                    "或通过 MediaDownloader(image_key='...') 手动传入密钥。"
                 )
         aes_blk = aligned_aes_block_size(aes_size)
         off = 15

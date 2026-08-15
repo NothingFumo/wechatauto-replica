@@ -108,6 +108,8 @@ def main():
     parser.add_argument("--filter", default=None,
                         help="仅处理指定类型，逗号分隔：图片/语音/视频/文件")
     parser.add_argument("--out", default=None, help="下载保存目录")
+    parser.add_argument("--image-key", default=None,
+                        help="图片 AES 密钥（16 位，若内存扫描不可用）")
     parser.add_argument("--list", action="store_true", help="仅列出媒体消息，不下载")
     parser.add_argument("--open", action="store_true",
                         help="下载后用系统默认程序打开（仅单文件）")
@@ -138,7 +140,7 @@ def main():
         if not ids:
             print("--ids 无效")
             sys.exit(1)
-        md = MediaDownloader(db, save_dir=args.out)
+        md = MediaDownloader(db, save_dir=args.out, image_key=args.image_key)
         for lid in ids:
             row = db.get_message_row(who, lid)
             if not row:
@@ -185,7 +187,7 @@ def main():
         sys.exit(0)
 
     # ---- 下载筛选出的媒体 ----
-    md = MediaDownloader(db, save_dir=args.out)
+    md = MediaDownloader(db, save_dir=args.out, image_key=args.image_key)
     ok = skip = fail = 0
     photo_done = 0
     for m in media_msgs:

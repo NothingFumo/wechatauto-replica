@@ -185,7 +185,7 @@ def main():
     #demo_voice_call(wx, who)
     demo_poke(wx, who)
     #demo_emoji_capture(wx, who)
-    print("\n全部演示完成。")
+    #print("\n全部演示完成。")
 
 
 if __name__ == "__main__":
