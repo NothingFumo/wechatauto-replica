@@ -32,6 +32,13 @@
 
 ## 版本记录
 
+### v1.1.2（2026-08-16）
+
+- **UIA 驱动线程安全**：`WeChatUIA` 实例化时在当前线程初始化 COM（`CoInitializeEx`，幂等）——修复后台线程/宿主进程（如 WeChatBot）实例化报「尚未调用 CoInitialize / 无法加载 UIAutomationCore.dll」。
+- **主窗口过滤**：只认加载了 `Weixin.dll` 的主进程窗口，过滤无 DLL 的辅助进程窗口（其热激活必然失败，不再刷噪音警告）。
+- **转发语音修复**：`Chat.ForwardVoiceMessage` 未指定目标时用 `self`（原 `_cur()` 可能误取会话）。
+- **UI 锁可重入**：`LockManager` 同线程可重入——`@uilock` 函数互相调用（如 `ForwardVoiceMessage` → `VoiceMessage.forward_to`）不再死锁。
+
 ### v1.1.1（2026-08-16）
 
 - **撤回消息**（`Chat.RecallLastMessage` / `uia_driver.recall_last_message`）：右键最新一条自己发的消息 → UIA 优先

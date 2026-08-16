@@ -339,7 +339,7 @@ class Chat:
         Returns:
             WxResponse
         """
-        chat = Chat(who or self.who, self._gui, self._db) if who else self._cur()
+        chat = Chat(who or self.who, self._gui, self._db) if who else self
         msgs = chat.GetAllMessage()
         for m in msgs:
             if getattr(m, 'type', None) == 'voice':

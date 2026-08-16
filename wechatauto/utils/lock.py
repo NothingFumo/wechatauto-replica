@@ -16,11 +16,19 @@ AsyncReturn = TypeVar("AsyncReturn")
 
 
 class LockManager:
-    """提供跨线程/进程/异步的锁。"""
+    """提供跨线程/进程/异步的锁。
+
+    ``process_lock``（multiprocessing.Lock）不可重入：同一线程内嵌套
+    ``acquire`` 会永久阻塞。因此用线程局部计数实现**同线程重入**——同一
+    线程重复获取时跳过进程锁（只需重入线程锁），保证
+    ``@uilock`` 修饰的函数互相调用（如 ``Chat.ForwardVoiceMessage``
+    内部调用 ``VoiceMessage.forward_to``）不会死锁。
+    """
 
     process_lock = multiprocessing.Lock()
     thread_lock = threading.RLock()
     _async_lock: asyncio.Lock | None = None
+    _local = threading.local()
 
     @classmethod
     def _get_async_lock(cls) -> asyncio.Lock:
@@ -41,21 +49,49 @@ class LockManager:
     @classmethod
     @contextmanager
     def acquire(cls):
-        """同步环境下获取锁。"""
+        """同步环境下获取锁（同线程可重入）。"""
 
+        depth = getattr(cls._local, "depth", 0)
+        if depth > 0:
+            # 同线程嵌套：进程锁已被本线程持有，跳过它，只重入线程锁
+            with cls.thread_lock:
+                cls._local.depth = depth + 1
+                try:
+                    yield
+                finally:
+                    cls._local.depth = depth
+            return
         with cls.process_lock:
             with cls.thread_lock:
-                yield
+                cls._local.depth = 1
+                try:
+                    yield
+                finally:
+                    cls._local.depth = 0
 
     @classmethod
     @asynccontextmanager
     async def acquire_async(cls):
-        """异步环境下获取锁。"""
+        """异步环境下获取锁（同线程可重入）。"""
 
+        depth = getattr(cls._local, "depth", 0)
+        if depth > 0:
+            async with cls._get_async_lock():
+                with cls.thread_lock:
+                    cls._local.depth = depth + 1
+                    try:
+                        yield
+                    finally:
+                        cls._local.depth = depth
+            return
         async with cls._get_async_lock():
             with cls.process_lock:
                 with cls.thread_lock:
-                    yield
+                    cls._local.depth = 1
+                    try:
+                        yield
+                    finally:
+                        cls._local.depth = 0
 
 
 @overload

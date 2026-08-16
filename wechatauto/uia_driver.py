@@ -151,6 +151,13 @@ class WeChatUIA:
     def __init__(self, timeout: float = 15.0, search_timeout: float = 2.0):
         self.timeout = timeout
         self._win = None
+        # 线程安全：WeChatBot 等宿主可能在后台线程实例化本驱动，COM 未初始化
+        # 时 uiautomation 会报「尚未调用 CoInitialize / 无法加载
+        # UIAutomationCore.dll」。CoInitializeEx 幂等，主线程重复调用无害。
+        try:
+            auto.InitializeUIAutomationInCurrentThread()
+        except Exception:
+            pass
         try:
             auto.SetGlobalSearchTimeout(search_timeout)
         except Exception:
@@ -449,8 +456,12 @@ class WeChatUIA:
         def cb(h, _):
             try:
                 if win32gui.IsWindowVisible(h) and win32gui.GetWindowText(h) in MAIN_NAMES:
-                    l, t, r, b = win32gui.GetWindowRect(h)
-                    res.append(((r - l) * (b - t), h))
+                    # 只保留加载了 Weixin.dll 的主进程窗口，过滤掉无 DLL 的
+                    # 辅助进程窗口（其热激活必然失败，只会产生噪音警告）
+                    pid = self._pid_from_hwnd(h)
+                    if pid and self._weixin_dll_module(pid):
+                        l, t, r, b = win32gui.GetWindowRect(h)
+                        res.append(((r - l) * (b - t), h))
             except Exception:
                 pass
             return True
