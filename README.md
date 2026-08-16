@@ -157,6 +157,8 @@ for feed in moments.get_moments(limit=10):
 
 Thanks to [vesio](https://github.com/vesio) for sharing the WeChat 4.1.12 UIA control-tree approach and debugging ideas in [issue #1](https://github.com/fanyuantaier/wechatauto-replica/issues/1) — it made the UIA hybrid driver (v1.0.8) possible.
 
+Thanks to [nanshanjack](https://github.com/nanshanjack) for finding the UI-lock re-entrancy problem (fixed in v1.1.2).
+
 ## 📄 License & Disclaimer
 
 Apache-2.0. This project is for personal learning and automation research only — please respect the WeChat software license agreement and applicable laws.

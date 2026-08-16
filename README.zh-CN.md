@@ -27,6 +27,8 @@
 ## 🤝 致谢
 
 > 感谢 [vesio](https://github.com/vesio) 在 [issue #1](https://github.com/fanyuantaier/wechatauto-replica/issues/1) 提供微信 4.1.12 的 UIA 控件树代码与思路，促成了 v1.0.8 的 UIA 混合驱动。
+>
+> 感谢 [nanshanjack](https://github.com/nanshanjack) 发现 UI 锁的可重入问题（v1.1.2 修复）。
 
 ---
 
