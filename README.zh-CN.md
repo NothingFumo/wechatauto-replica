@@ -18,6 +18,10 @@
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
 > 布局，其它 4.x 小版本可能需校准 `guia.py` 布局常量）。
 
+![解密读取微信 4.x 加密数据库](docs/demo_db_files.gif)
+
+*直接解密读取 `xwechat_files/.../db_storage/` 下的 `contact.db` / `message_*.db` / `sns.db` 加密库——纯本地，无 Web API。*
+
 ---
 
 ## 🤝 致谢

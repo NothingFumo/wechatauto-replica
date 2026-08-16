@@ -14,6 +14,10 @@ Automate the **WeChat 4.x Windows desktop client** (not the web version): read m
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
+![Reading encrypted WeChat 4.x databases](docs/demo_db_files.gif)
+
+*Reading the encrypted `contact.db` / `message_*.db` / `sns.db` files directly from `xwechat_files/.../db_storage/` — no web API, all local.*
+
 ## ✨ Features
 
 | Capability | Status | How |
