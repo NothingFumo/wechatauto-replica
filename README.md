@@ -10,7 +10,7 @@
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.0 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.1 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -132,6 +132,20 @@ for feed in moments.get_moments(limit=10):
 - Calibrate and verify file/image/reply/@ sending on unlocked desktops
 - Video message download (4.x storage location TBD)
 - Performance: parallel export / first-scan, incremental memory-scan cache
+
+## 📝 Changelog
+
+### v1.1.1 (2026-08-16)
+- **Recall last message** (`Chat.RecallLastMessage` / `uia_driver.recall_last_message`): right-click the latest own message → UIA-first menu-item click (`mmui::XMenuView` found inside the main-window subtree), OCR fallback; fails cleanly when the 2-minute recall window has passed (menu only shows "Delete").
+- UIA robustness: menu-item lookup scoped to the main-window subtree (avoids the Windows UIA root-traversal hang), removed the fragile `WindowControl(ClassName=...)` fallback.
+- Media fix: video id bytes→str decoding in `MediaDownloader`.
+- `demo_media.py --photos` default 3 → 10.
+
+### v1.1.0 (2026-08-15)
+- **Image AES key auto-capture** (`media.py`): the V2 image key is only resident in memory while viewing an image (~5 min). `_scan_aes_key()` gained a `monitor` mode — polls continuously and persists the key to `image_keys.json` once found; users just open one image to finish setup.
+- Fixed the process-ordering scan bug (removed the memory-usage sort that pushed the main process last).
+- **Forward voice messages**: SILK extraction from `media_0.db` + file-message send (`demo_forward_voice.py`).
+- New demos: `demo_group_messages.py` (group + red-packet ZSTD parsing), `demo_robust.py`.
 
 ## 🤝 Acknowledgments
 

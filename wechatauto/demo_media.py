@@ -102,7 +102,7 @@ def main():
     parser.add_argument("target", nargs="?", default="文件传输助手",
                         help="会话名（昵称/备注/username），默认文件传输助手")
     parser.add_argument("--limit", type=int, default=200, help="列出最近 N 条（默认 200）")
-    parser.add_argument("--photos", type=int, default=3, help="默认模式下载照片张数（默认 3）")
+    parser.add_argument("--photos", type=int, default=10, help="默认模式下载照片张数（默认 3）")
     parser.add_argument("--ids", default=None,
                         help="仅下载指定 local_id，逗号分隔，如 105,107")
     parser.add_argument("--filter", default=None,

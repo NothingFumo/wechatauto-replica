@@ -301,6 +301,24 @@ class Chat:
         return WxResponse.success(f'已对 {target} 拍一拍')
 
     @uilock
+    def RecallLastMessage(self, who: str = None) -> WxResponse:
+        """撤回当前会话最近一条自己发送的消息。
+
+        Args:
+            who: 会话对象，不指定则使用当前聊天对象
+
+        Returns:
+            WxResponse
+        """
+        target = who or self.who
+        uia = self._gui._get_uia()
+        if uia is None:
+            return WxResponse.failure('UIA 驱动不可用，无法撤回消息')
+        if not uia.recall_last_message(target):
+            return WxResponse.failure('撤回失败（消息已过期或控件不可识别）')
+        return WxResponse.success(f'已撤回对 {target} 发送的最近一条消息')
+
+    @uilock
     def ForwardVoiceMessage(
             self,
             who: str = None,

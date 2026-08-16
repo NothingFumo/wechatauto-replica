@@ -454,7 +454,7 @@ class MediaDownloader:
         if not isinstance(pi, bytes):
             return None
         m = re.search(rb"([0-9a-fA-F]{32})", pi)
-        vid = m.group(1).lower() if m else None
+        vid = m.group(1).decode().lower() if m else None
         base = os.path.join(self.db.account_dir, "msg", "video")
         for root, _, files in os.walk(base):
             for f in files:

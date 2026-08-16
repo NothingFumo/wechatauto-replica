@@ -32,6 +32,16 @@
 
 ## 版本记录
 
+### v1.1.1（2026-08-16）
+
+- **撤回消息**（`Chat.RecallLastMessage` / `uia_driver.recall_last_message`）：右键最新一条自己发的消息 → UIA 优先
+  （主窗口树内 `mmui::XMenuView` 菜单项定位「撤回」，Invoke/Select 或鼠标点击），OCR 兜底（全屏识别「撤回」
+  文字定位点击）；菜单只剩「删除」（超过 2 分钟撤回时限）时返回失败。
+- **UIA 健壮性**：菜单项查找限定在主窗口子树内（避免触发 Windows UIA 根遍历的系统挂起 bug）；移除脆弱的
+  `WindowControl(ClassName=...)` 兜底定位。
+- **媒体修复**：视频 id bytes→str 解码（`MediaDownloader`），修复视频文件定位。
+- `demo_media.py` `--photos` 默认 3 → 10。
+
 ### v1.1.0（2026-08-15）
 
 - **图片 AES 密钥自动监控捕获**（`media.py`）：微信 4.x 的 V2 图片 AES 密钥仅在

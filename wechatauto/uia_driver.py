@@ -472,16 +472,14 @@ class WeChatUIA:
             c = self._anchor(h)
             if c is not None and (c.ClassName or "") == MAIN_CLASS:
                 return c
-        w = auto.WindowControl(searchDepth=1, ClassName=MAIN_CLASS)
-        return w if w.Exists(0.3, 0.2) else None
+        return None
 
     def _login_window(self):
         for h in self._wechat_hwnds():
             c = self._anchor(h)
             if c is not None and (c.ClassName or "") == LOGIN_CLASS:
                 return c
-        w = auto.WindowControl(searchDepth=1, ClassName=LOGIN_CLASS)
-        return w if w.Exists(0.3, 0.2) else None
+        return None
 
     # ------------------------------------------------------------------ 前台/登录
     @staticmethod
@@ -984,6 +982,160 @@ class WeChatUIA:
                     cx = x + w // 2
                     cy = y + h // 2
                     self._set_cursor(cx, cy)
+                    time.sleep(0.2)
+                    self._left_click()
+                    time.sleep(0.5)
+                    return True
+        return False
+
+    def _right_click_latest_row(self, who: Optional[str] = None) -> Optional[Tuple[int, int]]:
+        """打开会话并右键最新一条消息行，返回气泡内右键坐标 (x, y)；失败返回 None。"""
+        if not self.ensure_window():
+            return None
+        if who and not self.current_chat() == who:
+            if not self.open_chat(who):
+                return None
+        lst = self._message_list()
+        if lst is None:
+            return None
+        rows = list(lst.GetChildren())
+        # 取可视区内最底部（最新）的消息行；时间分隔行 ChatItemView 跳过
+        candidates = []
+        for ch in rows:
+            try:
+                cn = ch.ClassName or ""
+                if not cn.startswith("mmui::Chat"):
+                    continue
+                if cn in ("mmui::ChatItemView", "mmui::ChatSystemInfoItemView"):
+                    continue
+                r = ch.BoundingRectangle
+                if r.bottom - r.top < 40:
+                    continue
+                candidates.append((ch, r))
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        # 最新消息在可视区底部（消息列表打开即定位在最新），取 bottom 最大者
+        target = max(candidates, key=lambda t: t[1].bottom)
+        ch, r = target
+        # 消息行内取内容重心 x（self 靠右、friend 靠左），y 取行垂直中心
+        try:
+            from PIL import ImageGrab as IG
+            img = IG.grab(bbox=(r.left, r.top, r.right, r.bottom))
+            import numpy as np
+            arr = np.array(img.convert("RGB"))
+            bg = (arr.max(axis=2) > 235) & ((arr.max(axis=2) - arr.min(axis=2)) < 22)
+            colc = (~bg).sum(axis=0)
+            total = int(colc.sum())
+            if total >= 20:
+                cx = sum(x * colc[x] for x in range(len(colc))) / total
+                cx = int(r.left + cx)
+            else:
+                cx = (r.left + r.right) // 2
+        except Exception:
+            cx = (r.left + r.right) // 2
+        cy = (r.top + r.bottom) // 2
+        self._set_cursor(cx, cy)
+        time.sleep(0.2)
+        self._right_click()
+        time.sleep(1.0)
+        return (cx, cy)
+
+    def _uia_find_menu_item(self, name_sub: str, max_depth: int = 6):
+        """在主窗口树内查找菜单项控件（UIA 方案）。
+
+        微信 4.x 右键菜单在热激活后物化为 UIA 节点：``mmui::XMenu`` 下挂
+        ``mmui::XMenuView``（Name 即菜单文字）。只遍历主窗口子树，避免
+        触发 Windows UIA 根遍历的系统挂起 bug。返回匹配的控件或 None。
+        """
+        w = self._win
+        if w is None:
+            return None
+        found = [None]
+
+        def walk(c, d=0):
+            if found[0] is not None or d > max_depth:
+                return
+            try:
+                children = c.GetChildren()
+            except Exception:
+                return
+            for ch in children:
+                try:
+                    nm = ch.Name or ""
+                    cn = ch.ClassName or ""
+                except Exception:
+                    nm = cn = ""
+                if cn == "mmui::XMenuView" and name_sub in nm:
+                    found[0] = ch
+                    return
+                walk(ch, d + 1)
+
+        try:
+            walk(w)
+        except Exception:
+            return None
+        return found[0]
+
+    def _uia_click_menu_item(self, ctrl) -> bool:
+        """通过 UIA Invoke/LegacyIAccessible 或鼠标点击菜单项控件。"""
+        for method in ("Invoke", "Select", "Expand"):
+            try:
+                getattr(ctrl, method)()
+                time.sleep(0.3)
+                return True
+            except Exception:
+                continue
+        try:
+            r = ctrl.BoundingRectangle
+            cx = (r.left + r.right) // 2
+            cy = (r.top + r.bottom) // 2
+            self._set_cursor(cx, cy)
+            time.sleep(0.2)
+            self._left_click()
+            time.sleep(0.3)
+            return True
+        except Exception:
+            return False
+
+    def recall_last_message(self, who: Optional[str] = None) -> bool:
+        """撤回当前会话最新一条自己发送的消息。
+
+        UIA 方案优先：右键消息行后，主窗口树内 ``mmui::XMenuView`` 已物化
+        菜单项（Name 含「撤回」），直接定位点击；若菜单项为「删除」（消息
+        超过 2 分钟撤回时限）则返回失败。UIA 不可用/未命中时降级到 OCR
+        （全屏识别「撤回」文字定位点击）。两者都失败返回 False。
+        """
+        pos = self._right_click_latest_row(who)
+        if pos is None:
+            return False
+        # UIA 方案
+        item = self._uia_find_menu_item("撤回")
+        if item is not None:
+            if self._uia_click_menu_item(item):
+                return True
+        # OCR 兜底
+        try:
+            from wechatauto.guia import ScreenOCR
+            import PIL.ImageGrab as IG
+        except Exception:
+            return False
+        for attempt in range(2):
+            if attempt > 0:
+                cx, cy = pos
+                self._set_cursor(cx, cy)
+                time.sleep(0.2)
+                self._right_click()
+                time.sleep(1.0)
+            img = IG.grab()
+            res = ScreenOCR.recognize(img)
+            for text, x, y, w, h in res:
+                t = (text or "").replace(" ", "")
+                if "撤回" in t or t == "撤回":
+                    cxx = x + w // 2
+                    cyy = y + h // 2
+                    self._set_cursor(cxx, cyy)
                     time.sleep(0.2)
                     self._left_click()
                     time.sleep(0.5)
