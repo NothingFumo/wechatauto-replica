@@ -12,7 +12,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.1.0
+> 当前版本：1.1.3
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -29,10 +29,20 @@
 > 感谢 [vesio](https://github.com/vesio) 在 [issue #1](https://github.com/fanyuantaier/wechatauto-replica/issues/1) 提供微信 4.1.12 的 UIA 控件树代码与思路，促成了 v1.0.8 的 UIA 混合驱动。
 >
 > 感谢 [nanshanjack](https://github.com/nanshanjack) 发现 UI 锁的可重入问题（v1.1.2 修复）。
+>
+> 感谢 [maozhitao12450](https://github.com/maozhitao12450) 报告 WXAM (wxgf) 图片下载问题（v1.1.3 修复）。
 
 ---
 
 ## 版本记录
+
+### v1.1.3（2026-08-17）
+
+- **WXAM (wxgf) 图片解码**：微信 4.x 现在把**普通图片**（不仅是动图贴纸）也存进 WXAM 容器
+  （内部为 HEVC 比特流）。`MediaDownloader.download_image` 新增 wxgf 处理：提取 HEVC
+  Annex-B 流，用 ffmpeg 转码为 JPG（优先用 `imageio-ffmpeg` 内置二进制，其次 PATH 上的
+  ffmpeg）；ffmpeg 不可用时不再丢弃数据，改为保存原始解密数据为 `.wxgf` 兜底。
+- 新增依赖：`imageio-ffmpeg>=0.4.9`。
 
 ### v1.1.2（2026-08-16）
 
