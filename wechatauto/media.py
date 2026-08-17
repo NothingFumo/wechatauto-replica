@@ -375,6 +375,57 @@ class MediaDownloader:
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, name)
 
+    # ------------------------------------------------------------------
+    # WXAM (wxgf) 解码：微信 4.x 普通图片的新存储格式，内部为 HEVC 裸流
+    # ------------------------------------------------------------------
+    def _extract_hevc(self, data: bytes) -> Optional[bytes]:
+        """从 wxgf 容器提取 HEVC Annex-B 裸流（自首个 NALU 起始码起）。"""
+        start = data.find(b"\x00\x00\x00\x01")
+        return data[start:] if start >= 0 else None
+
+    @staticmethod
+    def _ffmpeg_exe() -> Optional[str]:
+        import shutil
+        exe = shutil.which("ffmpeg")
+        if exe:
+            return exe
+        try:
+            import imageio_ffmpeg
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return None
+
+    def _wxgf_to_jpg(self, data: bytes) -> Optional[bytes]:
+        """用 ffmpeg 把 wxgf 内的 HEVC 裸流转码为 jpg。失败返回 None。"""
+        exe = self._ffmpeg_exe()
+        if exe is None:
+            return None
+        hevc = self._extract_hevc(data)
+        if not hevc:
+            return None
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "in.hevc")
+            dst = os.path.join(td, "out.jpg")
+            with open(src, "wb") as f:
+                f.write(hevc)
+            try:
+                r = subprocess.run(
+                    [exe, "-y", "-v", "error", "-i", src, "-frames:v", "1", dst],
+                    capture_output=True, timeout=30,
+                )
+            except Exception:
+                return None
+            if r.returncode == 0:
+                try:
+                    with open(dst, "rb") as f:
+                        out = f.read()
+                    return out if out[:3] == b"\xff\xd8\xff" else None
+                except OSError:
+                    return None
+        return None
+
     def _img_md5(self, row: dict) -> Optional[str]:
         pi = row.get("packed_info")
         content = row.get("content")
@@ -405,8 +456,18 @@ class MediaDownloader:
         elif data[:3] == b"GIF":
             ext = "gif"
         elif data[:4] == b"wxgf":
-            # 微信动画表情容器：不是可查看的图片，不落盘为伪 .gif
-            return None
+            # WXAM 格式：微信 4.x 普通图片也用 HEVC 编码存储（含动画表情）。
+            # 优先用 ffmpeg 转码为 jpg；不可用时把原始解密数据落盘为 .wxgf 兜底。
+            jpg = self._wxgf_to_jpg(data)
+            if jpg is not None:
+                out = self._out(save_dir, "%s_%s.%s" % (user, local_id, "jpg"))
+                with open(out, "wb") as f:
+                    f.write(jpg)
+                return out
+            out = self._out(save_dir, "%s_%s.wxgf" % (user, local_id))
+            with open(out, "wb") as f:
+                f.write(data)
+            return out
         else:
             ext = "img"
         out = self._out(save_dir, "%s_%s.%s" % (user, local_id, ext))
