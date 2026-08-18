@@ -10,7 +10,7 @@
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.3 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.4 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -125,7 +125,8 @@ for feed in moments.get_moments(limit=10):
 2. **Image AES key is transient** — only resident while viewing an image; persisted to `image_keys.json` once found, or inject via `image_key=`.
 3. **Sending is a GUI operation** — fails cleanly when the desktop is locked (`desktop_available()` returns False).
 4. **Videos** are downloadable only when the mp4 already exists on disk (`msg/video/`).
-5. **Moments posting is dropped** (4.x self-drawn UI, unreliable); reading/likes/comments are supported.
+5. **Group-chat image originals** are stored locally only after being opened (viewed) in WeChat; until then only the thumbnail (`_t.dat`) exists — `download_image` falls back to the thumbnail (marked `_thumb` in the filename).
+6. **Moments posting is dropped** (4.x self-drawn UI, unreliable); reading/likes/comments are supported.
 
 ## 🗺️ Roadmap
 
@@ -135,8 +136,12 @@ for feed in moments.get_moments(limit=10):
 
 ## 📝 Changelog
 
+### v1.1.4 (2026-08-18)
+- **`demo_media.py --images N`**: download the latest N images of a chat directly from the DB (by local_type), bypassing the total-message `--limit` — no more "only a few images listed" when a group has thousands of messages.
+- **`WeChatDB._find_media_rows(user, types)`**: new helper returning all media local_ids of a chat for a set of local_types (batch download).
+- **Group-chat image thumbnail fallback**: original images in group chats are only downloaded after being opened in WeChat; `download_image` now falls back to the thumbnail (`_t.dat`) when the original is missing, saving it with a `_thumb` suffix.
+
 ### v1.1.3 (2026-08-17)
-- **WXAM (wxgf) image decoding**: WeChat 4.x stores normal images (not just animated stickers) in the WXAM container (internal HEVC bitstream). `MediaDownloader.download_image` now extracts the HEVC Annex-B stream and transcodes it to JPG via ffmpeg (`imageio-ffmpeg` bundled binary, or any `ffmpeg` on PATH); when ffmpeg is unavailable the raw decrypted data is saved as `.wxgf` instead of being dropped.
 
 ### v1.1.2 (2026-08-16)
 - **UIA driver thread-safety**: `WeChatUIA` now initializes COM on the current thread (`CoInitializeEx`, idempotent) — fixes crashes when instantiated from background threads / host apps (e.g. WeChatBot) with "CoInitialize not called / cannot load UIAutomationCore.dll" errors.

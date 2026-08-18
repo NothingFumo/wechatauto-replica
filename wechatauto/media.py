@@ -359,11 +359,13 @@ class MediaDownloader:
     def _month_of(self, create_time: int) -> str:
         return time.strftime("%Y-%m", time.localtime(create_time))
 
-    def _find_dat(self, user: str, md5: str, create_time: int) -> Optional[str]:
+    def _find_dat(self, user: str, md5: str, create_time: int,
+                  thumbnail: bool = False) -> Optional[str]:
         base = os.path.join(self.db.account_dir, "msg", "attach", self._chat_md5(user))
+        target = md5 + ("_t.dat" if thumbnail else ".dat")
         for root, _, files in os.walk(base):
             for f in files:
-                if f == md5 + ".dat":
+                if f == target:
                     return os.path.join(root, f)
         return None
 
@@ -446,9 +448,15 @@ class MediaDownloader:
         if not md5:
             return None
         dat_path = self._find_dat(user, md5, row["create_time"])
+        thumb = False
         if not dat_path:
-            return None
+            # 群聊图片默认只有缩略图（原图未在微信中点开查看时不下发），回退缩略图
+            dat_path = self._find_dat(user, md5, row["create_time"], thumbnail=True)
+            if not dat_path:
+                return None
+            thumb = True
         data = self.decrypt_image(dat_path, aes_key, xor_key)
+        suffix = "_thumb" if thumb else ""
         if data[:3] == b"\xff\xd8\xff":
             ext = "jpg"
         elif data[:4] == b"\x89PNG":
@@ -460,17 +468,17 @@ class MediaDownloader:
             # 优先用 ffmpeg 转码为 jpg；不可用时把原始解密数据落盘为 .wxgf 兜底。
             jpg = self._wxgf_to_jpg(data)
             if jpg is not None:
-                out = self._out(save_dir, "%s_%s.%s" % (user, local_id, "jpg"))
+                out = self._out(save_dir, "%s_%s%s.%s" % (user, local_id, suffix, "jpg"))
                 with open(out, "wb") as f:
                     f.write(jpg)
                 return out
-            out = self._out(save_dir, "%s_%s.wxgf" % (user, local_id))
+            out = self._out(save_dir, "%s_%s%s.wxgf" % (user, local_id, suffix))
             with open(out, "wb") as f:
                 f.write(data)
             return out
         else:
             ext = "img"
-        out = self._out(save_dir, "%s_%s.%s" % (user, local_id, ext))
+        out = self._out(save_dir, "%s_%s%s.%s" % (user, local_id, suffix, ext))
         with open(out, "wb") as f:
             f.write(data)
         return out

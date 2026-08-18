@@ -666,9 +666,28 @@ class WeChatDB:
             "sort_seq": row["sort_seq"],
         }
 
+    def _find_media_rows(self, user: str, types: set) -> List[int]:
+        """按 local_type 直接查该会话全部媒体 local_id（降序），不受总消息分页限制。
+
+        供批量下载场景使用（如一次性拉取某群全部图片）。
+        """
+        found = self._msg_conn(user)
+        if not found:
+            return []
+        conn, table = found
+        try:
+            placeholders = ",".join("?" * len(types))
+            rows = conn.execute(
+                "SELECT local_id FROM %s WHERE local_type IN (%s) "
+                "ORDER BY sort_seq DESC" % (table, placeholders),
+                tuple(sorted(types)),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [r["local_id"] for r in rows]
+
     def get_new_messages(self, user: str, since_seq: int = 0, limit: int = 200) -> List[dict]:
         """返回 sort_seq > since_seq 的新消息（升序），供轮询监听使用"""
-        found = self._msg_conn(user)
         if not found:
             return []
         conn, table = found
