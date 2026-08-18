@@ -484,12 +484,15 @@ class MediaDownloader:
         return out
 
     def download_voice(self, user: str, local_id: int, save_dir: Optional[str] = None) -> Optional[str]:
-        """语音：media_0.db VoiceInfo.voice_data（SILK 二进制），落盘 .silk"""
+        """语音：media_*.db VoiceInfo.voice_data（SILK 二进制），落盘 .silk
+
+        微信按账号/时间把语音分片存到多个 media_*.db，逐个搜索直到找到。
+        """
         row = self.db.get_message_row(user, local_id)
         if not row or row["local_type"] != 34 or not row["server_id"]:
             return None
         for rel, path, _ in self.db._db_files:
-            if os.path.basename(path) != "media_0.db":
+            if not os.path.basename(path).startswith("media_"):
                 continue
             conn = self.db._open(rel)
             try:
@@ -498,7 +501,7 @@ class MediaDownloader:
                 ).fetchone()
                 chat_id = cid[0] if cid else None
                 if chat_id is None:
-                    return None
+                    continue
                 v = conn.execute(
                     "SELECT voice_data FROM VoiceInfo WHERE chat_name_id=? AND svr_id=? "
                     "ORDER BY create_time DESC LIMIT 1",
@@ -511,7 +514,6 @@ class MediaDownloader:
                 with open(out, "wb") as f:
                     f.write(v["voice_data"])
                 return out
-            break
         return None
 
     def download_video(self, user: str, local_id: int, save_dir: Optional[str] = None) -> Optional[str]:

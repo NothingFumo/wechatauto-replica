@@ -18,7 +18,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.1.4.2
+> 当前版本：1.1.5
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -37,10 +37,16 @@
 > 感谢 [nanshanjack](https://github.com/nanshanjack) 发现 UI 锁的可重入问题（v1.1.2 修复）。
 >
 > 感谢 [maozhitao12450](https://github.com/maozhitao12450) 报告 WXAM (wxgf) 图片下载问题（v1.1.3 修复）。
+>
+> 感谢 [uiharukazari0105](https://github.com/uiharukazari0105) 发现语音数据分片存储（`media_1.db` 等）从未被搜索的问题（v1.1.4 修复）。
 
 ---
 
 ## 版本记录
+
+### v1.1.5（2026-08-18）
+
+- **版本号规范化**：语音跨库下载修复后整理补丁版本号（1.1.4.2 → 1.1.5）。
 
 ### v1.1.4.2（2026-08-18）
 
@@ -52,6 +58,7 @@
 
 ### v1.1.4（2026-08-18）
 
+- **跨全部媒体库下载语音**：`download_voice()` 现在搜索所有 `media_*.db`（不再只查 `media_0.db`）——微信把语音分片存到多个媒体库；此前存在 `media_1.db` 等的语音无法找到（感谢 uiharukazari0105）。
 - **群聊图片缩略图回退**：群聊的图片原图只有被点开（查看）后才会落盘本地；原图未点开不下发时，`download_image` 自动回退到缩略图（`_t.dat`），保存为带 `_thumb` 后缀的文件。
 - **`WeChatDB._find_media_rows(user, types)`**：新增批量查媒体接口——返回某会话指定 `local_type` 集合的全部媒体 `local_id`（用于批量下载）。
 - **`demo_media.py --images N`**：按 `local_type` 直接从数据库下载某会话最近 N 张图片，绕过总消息数 `--limit` 的限制——群聊消息上万条时不再「只列出几张图」。
@@ -626,7 +633,7 @@ quick_send_file(r'D:\资料\报告.pdf', '文件传输助手')
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.4.2 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.5 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -752,6 +759,9 @@ for feed in moments.get_moments(limit=10):
 
 ## 📝 Changelog
 
+### v1.1.5 (2026-08-18)
+- **Version cleanup**: normalized the patch version (1.1.4.2 → 1.1.5) after the `media_*.db` voice fix.
+
 ### v1.1.4.2 (2026-08-18)
 - **PyPI description cleanup**: removed the demo default-group changelog line from the PyPI description.
 
@@ -759,6 +769,7 @@ for feed in moments.get_moments(limit=10):
 - **PyPI readme bilingual**: merged the Chinese (`README.zh-CN.md`) and English (`README.md`) into one PyPI description so the Chinese version is visible on the package page.
 
 ### v1.1.4 (2026-08-18)
+- **Voice download across all media databases**: `download_voice()` now searches every `media_*.db` (not just `media_0.db`) — WeChat shards voice data across multiple media DBs; previously voices stored in `media_1.db` etc. could not be found (thanks uiharukazari0105).
 - **`demo_media.py --images N`**: download the latest N images of a chat directly from the DB (by local_type), bypassing the total-message `--limit` — no more "only a few images listed" when a group has thousands of messages.
 - **`WeChatDB._find_media_rows(user, types)`**: new helper returning all media local_ids of a chat for a set of local_types (batch download).
 - **Group-chat image thumbnail fallback**: original images in group chats are only downloaded after being opened in WeChat; `download_image` now falls back to the thumbnail (`_t.dat`) when the original is missing, saving it with a `_thumb` suffix.
@@ -790,6 +801,8 @@ Thanks to [vesio](https://github.com/vesio) for sharing the WeChat 4.1.12 UIA co
 Thanks to [nanshanjack](https://github.com/nanshanjack) for finding the UI-lock re-entrancy problem (fixed in v1.1.2).
 
 Thanks to [maozhitao12450](https://github.com/maozhitao12450) for reporting the WXAM (wxgf) image download issue (fixed in v1.1.3).
+
+Thanks to [uiharukazari0105](https://github.com/uiharukazari0105) for finding that voice data stored in `media_1.db` (and later) was never searched (fixed in v1.1.4).
 
 ## 📄 License & Disclaimer
 

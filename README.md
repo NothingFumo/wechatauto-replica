@@ -10,7 +10,7 @@
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.4.2 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.5 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -136,6 +136,9 @@ for feed in moments.get_moments(limit=10):
 
 ## 📝 Changelog
 
+### v1.1.5 (2026-08-18)
+- **Version cleanup**: normalized the patch version (1.1.4.2 → 1.1.5) after the `media_*.db` voice fix.
+
 ### v1.1.4.2 (2026-08-18)
 - **PyPI description cleanup**: removed the demo default-group changelog line from the PyPI description.
 
@@ -143,6 +146,7 @@ for feed in moments.get_moments(limit=10):
 - **PyPI readme bilingual**: merged the Chinese (`README.zh-CN.md`) and English (`README.md`) into one PyPI description so the Chinese version is visible on the package page.
 
 ### v1.1.4 (2026-08-18)
+- **Voice download across all media databases**: `download_voice()` now searches every `media_*.db` (not just `media_0.db`) — WeChat shards voice data across multiple media DBs; previously voices stored in `media_1.db` etc. could not be found (thanks uiharukazari0105).
 - **`demo_media.py --images N`**: download the latest N images of a chat directly from the DB (by local_type), bypassing the total-message `--limit` — no more "only a few images listed" when a group has thousands of messages.
 - **`WeChatDB._find_media_rows(user, types)`**: new helper returning all media local_ids of a chat for a set of local_types (batch download).
 - **Group-chat image thumbnail fallback**: original images in group chats are only downloaded after being opened in WeChat; `download_image` now falls back to the thumbnail (`_t.dat`) when the original is missing, saving it with a `_thumb` suffix.
@@ -174,6 +178,8 @@ Thanks to [vesio](https://github.com/vesio) for sharing the WeChat 4.1.12 UIA co
 Thanks to [nanshanjack](https://github.com/nanshanjack) for finding the UI-lock re-entrancy problem (fixed in v1.1.2).
 
 Thanks to [maozhitao12450](https://github.com/maozhitao12450) for reporting the WXAM (wxgf) image download issue (fixed in v1.1.3).
+
+Thanks to [uiharukazari0105](https://github.com/uiharukazari0105) for finding that voice data stored in `media_1.db` (and later) was never searched (fixed in v1.1.4).
 
 ## 📄 License & Disclaimer
 
