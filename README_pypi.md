@@ -18,7 +18,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.1.4.1
+> 当前版本：1.1.4.2
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -42,6 +42,10 @@
 
 ## 版本记录
 
+### v1.1.4.2（2026-08-18）
+
+- **PyPI 描述清理**：移除 v1.1.4 版本记录中关于 demo 默认群改动的条目。
+
 ### v1.1.4.1（2026-08-18）
 
 - **PyPI 页面中英双语**：PyPI 描述合并中文（`README.zh-CN.md`）与英文（`README.md`）两个版本，中文版在包页面可见。
@@ -51,7 +55,6 @@
 - **群聊图片缩略图回退**：群聊的图片原图只有被点开（查看）后才会落盘本地；原图未点开不下发时，`download_image` 自动回退到缩略图（`_t.dat`），保存为带 `_thumb` 后缀的文件。
 - **`WeChatDB._find_media_rows(user, types)`**：新增批量查媒体接口——返回某会话指定 `local_type` 集合的全部媒体 `local_id`（用于批量下载）。
 - **`demo_media.py --images N`**：按 `local_type` 直接从数据库下载某会话最近 N 张图片，绕过总消息数 `--limit` 的限制——群聊消息上万条时不再「只列出几张图」。
-- demo 默认群改为「26级金高新生群1群」，limit 1000。
 
 ### v1.1.3（2026-08-17）
 
@@ -623,7 +626,7 @@ quick_send_file(r'D:\资料\报告.pdf', '文件传输助手')
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.4.1 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.4.2 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -748,6 +751,9 @@ for feed in moments.get_moments(limit=10):
 - Performance: parallel export / first-scan, incremental memory-scan cache
 
 ## 📝 Changelog
+
+### v1.1.4.2 (2026-08-18)
+- **PyPI description cleanup**: removed the demo default-group changelog line from the PyPI description.
 
 ### v1.1.4.1 (2026-08-18)
 - **PyPI readme bilingual**: merged the Chinese (`README.zh-CN.md`) and English (`README.md`) into one PyPI description so the Chinese version is visible on the package page.
