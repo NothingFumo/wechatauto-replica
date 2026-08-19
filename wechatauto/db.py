@@ -588,10 +588,54 @@ class WeChatDB:
                 fout.write(_decrypt_page(key, page, pgno))
 
     def _message_dbs(self) -> List[str]:
+        """返回当前所有消息分片库。微信运行中可能新建分片（如 message_5.db），
+        因此每次动态重扫磁盘并补齐新库密钥，而不是用 __init__ 时的静态缓存。
+        """
+        self._refresh_db_files()
         return sorted(
             rel for rel, path, _ in self._db_files
             if re.match(r"^message[\\/]message_\d+\.db$", rel.replace(os.sep, "/"))
         )
+
+    def _refresh_db_files(self) -> None:
+        """重扫磁盘上的 db 文件；发现新文件时补提取其密钥，避免旧缓存漏掉新分片。
+
+        性能：仅当 message 目录下的文件清单有变化（新增 message_5.db 等）或首次
+        调用时才做全量重扫，否则直接复用 __init__ 时的扫描结果。
+        """
+        msg_dir = os.path.join(self.account_dir, "db_storage", "message")
+        try:
+            cur = sorted(
+                n for n in os.listdir(msg_dir)
+                if n.endswith(".db") and not n.endswith("-wal") and not n.endswith("-shm")
+            )
+        except OSError:
+            return
+        prev = sorted(
+            os.path.basename(path)
+            for rel, path, _ in self._db_files
+            if re.match(r"^message[\\/].*\.db$", rel.replace(os.sep, "/"))
+        )
+        if cur == prev:
+            return
+        current = self._collect_db_files()
+        if current == self._db_files:
+            return
+        self._db_files = current
+        new_rels = [
+            rel for rel, path, _ in current
+            if rel not in self._keys or not self._key_works(rel)
+        ]
+        if new_rels:
+            try:
+                extracted = self.extract_keys()
+                self._keys.update(extracted)
+                self._save_keys()
+            except Exception:
+                pass
+        self.unkeyed = [
+            rel for rel, _, _ in self._db_files if not self._key_works(rel)
+        ]
 
     def _find_msg_table(self, user: str, conns: List[sqlite3.Connection]) -> Optional[Tuple[sqlite3.Connection, str]]:
         target = "Msg_" + _md5_hex(user.encode())
@@ -688,6 +732,7 @@ class WeChatDB:
 
     def get_new_messages(self, user: str, since_seq: int = 0, limit: int = 200) -> List[dict]:
         """返回 sort_seq > since_seq 的新消息（升序），供轮询监听使用"""
+        found = self._msg_conn(user)
         if not found:
             return []
         conn, table = found
