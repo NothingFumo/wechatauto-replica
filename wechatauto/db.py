@@ -218,6 +218,10 @@ class WeChatDB:
         files = []
         base = os.path.join(self.account_dir, "db_storage")
         for root, _, names in os.walk(base):
+            # migrate 目录下的 unspportmsg.db 是微信保留的未支持消息库，
+            # 进程内存中不存在对应密钥、代码从不访问，排除以免误触发密钥提取
+            if os.path.normcase(os.path.relpath(root, base)).startswith("migrate"):
+                continue
             for name in names:
                 if not name.endswith(".db") or name.endswith("-wal") or name.endswith("-shm"):
                     continue
@@ -267,9 +271,23 @@ class WeChatDB:
             extracted = self.extract_keys()
             self._keys.update(extracted)
             self._save_keys()
-        self.unkeyed = [
+        still = [
             rel for rel, _, _ in self._db_files if not self._key_works(rel)
         ]
+        if still and missing:
+            import sys as _sys
+            print(
+                "[wechatauto] 警告: 以下库无可用密钥，无法解密: %s"
+                % ", ".join(still),
+                file=_sys.stderr,
+            )
+            print(
+                "[wechatauto] 已加载 %d/%d 个密钥 (缓存: %s)。请确认微信已登录，"
+                "可运行 python -m wechatauto.diagnose_keys 排查"
+                % (len(self._keys) - len(still), len(self._db_files), self.keys_file),
+                file=_sys.stderr,
+            )
+        self.unkeyed = still
 
     def _key_works(self, rel: str) -> bool:
         key = self._keys.get(rel)
@@ -444,7 +462,12 @@ class WeChatDB:
         - 仅 WAL 追加了新帧 → 增量合并新帧（秒级）。
         """
         if rel not in self._keys:
-            raise RuntimeError("数据库无可用密钥: %s" % rel)
+            raise RuntimeError(
+                "数据库无可用密钥: %s。请确认微信已登录且保持窗口打开；"
+                "若仍复现，运行 python -m wechatauto.diagnose_keys 并把完整输出发给维护者。"
+                "也可删除密钥缓存强制重新提取后重试: %s"
+                % (rel, self.keys_file)
+            )
         src = self._db_path(rel)
         dst = os.path.join(self.workdir, rel.replace(os.sep, "__"))
         key = self._keys[rel]
