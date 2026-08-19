@@ -142,7 +142,7 @@ for feed in moments.get_moments(limit=10):
 - **Fix real-time listening**: `WeChatDB.get_new_messages()` referenced an undefined `found` (NameError swallowed by `Listener._poll_once`), so **no** message callbacks ever fired — including first messages from contacts you had never chatted with.
 - **Dynamic message shards**: `_message_dbs()` now re-scans the disk so shards WeChat creates at runtime (e.g. `message_5.db`) are picked up and their keys extracted automatically.
 - **Actionable key errors**: `数据库无可用密钥` now points to `python -m wechatauto.diagnose_keys` and the cached `keys.json` path; `_load_or_extract_keys` warns on stderr with the missing-DB list and extraction progress.
-- **New diagnostic tool**: `wechatauto/diagnose_keys.py` (`python -m wechatauto.diagnose_keys`, WeChat logged in) dumps library version, Weixin PIDs, data-dir/account detection, cached keys, fresh in-memory extraction results, and key verification — paste the output when reporting key-extraction failures.
+- **New diagnostic tool**: `wechatauto/diagnose_keys.py` (`python -m wechatauto.diagnose_keys`, WeChat logged in) dumps library version, Python bitness, Weixin PIDs with per-process read-permission checks, data-dir/account detection vs. all accounts on disk, cached keys, fresh in-memory extraction results, and key verification — paste the output when reporting key-extraction failures.
 - **Skip `migrate\unspportmsg.db`**: WeChat's reserved "unsupported message" DB has no in-memory key and is never queried; it was making every init run a full process-memory scan.
 
 ### v1.1.5 (2026-08-18)

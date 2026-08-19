@@ -21,6 +21,7 @@ print("=" * 60)
 print("wechatauto-replica key diagnostic")
 print("=" * 60)
 print("Python:", sys.version.split()[0])
+print("Python bits:", 64 if sys.maxsize > 2**32 else 32)
 print("OS:", sys.platform)
 
 # 1. library version
@@ -36,13 +37,62 @@ except Exception as e:
 
 # 2. Weixin processes
 print("\n--- Weixin processes ---")
+weixin_pids = []
 try:
     r = subprocess.run(
         ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
         capture_output=True, text=True)
     print("tasklist:\n%s" % (r.stdout.strip() or "(no Weixin.exe)"))
+    for line in r.stdout.strip().splitlines():
+        parts = line.strip('"').split('","')
+        if len(parts) >= 2 and parts[1].isdigit():
+            weixin_pids.append(int(parts[1]))
 except Exception as e:
     print("tasklist failed:", repr(e))
+
+# 2b. per-PID permission / read test (key root-cause for silent 0-key extraction)
+print("\n--- per-PID access test ---")
+if not weixin_pids:
+    print("(no Weixin.exe running - open WeChat and log in first)")
+else:
+    import ctypes
+    from ctypes import wintypes
+    from wechatauto.db import _MBI
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t)]
+    k32.VirtualQueryEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, ctypes.POINTER(_MBI), ctypes.c_size_t]
+    for pid in weixin_pids:
+        h = k32.OpenProcess(0x0010 | 0x0400, False, pid)  # VM_READ | QUERY_INFORMATION
+        if not h:
+            err = ctypes.get_last_error()
+            print("PID %d: OpenProcess FAILED (error %d - likely needs admin / same-elevation)" % (pid, err))
+            continue
+        ok = 0
+        first_region = None
+        addr = ctypes.c_void_p(0)
+        for _ in range(4000):
+            mbi = _MBI()
+            n = k32.VirtualQueryEx(h, addr, ctypes.byref(mbi), ctypes.sizeof(_MBI))
+            if n == 0:
+                break
+            if (mbi.State == 0x1000 and (mbi.Protect & 0xFF) & 0xE6
+                    and not (mbi.Protect & 0x100) and 0 < mbi.RegionSize < 0x10000000):
+                buf = ctypes.create_string_buffer(8)
+                br = ctypes.c_size_t(0)
+                if k32.ReadProcessMemory(h, ctypes.c_void_p(mbi.BaseAddress or 0), buf, 8, ctypes.byref(br)) and br.value == 8:
+                    ok += 1
+                    if first_region is None:
+                        first_region = mbi.BaseAddress or 0
+                    break
+            addr = ctypes.c_void_p((mbi.BaseAddress or 0) + mbi.RegionSize)
+        ctypes.windll.kernel32.CloseHandle(h)
+        print("PID %d: OpenProcess OK, first readable region: %s (readable-region check %s)"
+              % (pid, "0x%x" % first_region if first_region else "NONE", "OK" if ok else "FAILED"))
 
 # 3. data dir detection
 print("\n--- data dir ---")
@@ -78,6 +128,13 @@ try:
     missing = [rel for rel, _, _ in db._db_files if rel not in db._keys]
     print("missing:", missing)
     print("unkeyed:", db.unkeyed)
+    # which account dirs exist vs which one was picked
+    import glob
+    print("accounts on disk:", sorted(
+        os.path.basename(x) for x in glob.glob(
+            os.path.join(db.db_dir, "wxid_*"))
+        if os.path.isdir(os.path.join(x, "db_storage"))))
+    print("picked account:  ", db.account)
 except Exception as e:
     print("init error:", repr(e))
     traceback.print_exc()

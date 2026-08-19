@@ -43,7 +43,7 @@
 - **修复实时监听不触发**：`WeChatDB.get_new_messages()` 引用了未定义的 `found`（NameError 被 `Listener._poll_once` 吞掉），导致消息回调从未触发——包括从未聊过天的联系人的首条消息。
 - **动态消息分片**：`_message_dbs()` 现在会重新扫描磁盘，微信运行中新建的分片（如 `message_5.db`）会被自动发现并提取密钥。
 - **可操作的密钥报错**：`数据库无可用密钥` 报错现在会提示运行 `python -m wechatauto.diagnose_keys` 并给出 keys.json 缓存路径；`_load_or_extract_keys` 在缺密钥时向 stderr 输出缺失库清单与提取进度。
-- **新增诊断工具**：`wechatauto/diagnose_keys.py`（微信登录后运行 `python -m wechatauto.diagnose_keys`）输出库版本、微信进程 PID、数据目录/账号检测、已缓存密钥、进程内存重新提取结果与密钥校验情况——报密钥提取问题时把输出完整发给维护者即可定位。
+- **新增诊断工具**：`wechatauto/diagnose_keys.py`（微信登录后运行 `python -m wechatauto.diagnose_keys`）输出库版本、Python 位数、微信进程 PID 及逐个进程的读取权限检测、数据目录/账号检测与磁盘全部账号对比、已缓存密钥、进程内存重新提取结果与密钥校验情况——报密钥提取问题时把输出完整发给维护者即可定位。
 - **跳过 `migrate\unspportmsg.db`**：该库是微信保留的「未支持消息」库，进程内存中无对应密钥、代码也从不会访问；此前它会让每次初始化都触发一次全进程内存扫描。
 
 ### v1.1.5（2026-08-18）
