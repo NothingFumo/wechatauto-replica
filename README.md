@@ -10,7 +10,7 @@
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.6.1 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.6.2 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -137,6 +137,10 @@ for feed in moments.get_moments(limit=10):
 - Performance: parallel export / first-scan, incremental memory-scan cache
 
 ## 📝 Changelog
+
+### v1.1.6.2 (2026-08-20)
+- **Fix OCR hang**: `ScreenOCR.recognize` now wraps the WinRT async call in `asyncio.wait_for(..., 8s)` — a hung `Windows.Media.Ocr` async (e.g. Chinese-locale systems) previously blocked `quick_send` forever; it now times out and degrades to empty OCR results.
+- **Support WeChat builds with plaintext-header (key+salt) DBs**: key extraction now accepts SQLCipher 4 "Raw Key with Explicit Salt" form (`x'<96hex>'` = 32B key + 16B explicit salt, used with `cipher_plaintext_header_size`). A 48-byte key (32B key + 16B salt) is verified and decrypted in plaintext-header layout (page-1 keeps its plaintext header); a 32-byte key keeps the standard file-header-salt path. This unblocks DB decryption on builds where the old offsets point at the class-name table instead of the Cipher instance (e.g. a 4.1.12.26 environment).
 
 ### v1.1.6.1 (2026-08-20)
 - **PyPI description fix**: v1.1.6 was uploaded without the synced `README_pypi.md` (description still showed 1.1.5.1); this patch restores the full v1.1.6 changelog and bumps the version marker.

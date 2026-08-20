@@ -356,7 +356,10 @@ class ScreenOCR:
             return out
 
         try:
-            return asyncio.run(_run())
+            return asyncio.run(asyncio.wait_for(_run(), timeout=8))
+        except asyncio.TimeoutError:
+            wxlog.debug('OCR 识别超时（8s）')
+            return []
         except Exception as e:
             wxlog.debug(f'OCR 识别失败：{e}')
             return []

@@ -100,10 +100,30 @@ def _aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
     return dec.update(data) + dec.finalize()
 
 
-def _verify_enc_key(enc_key: bytes, page1: bytes) -> bool:
+def _split_key(key: bytes) -> Tuple[bytes, Optional[bytes]]:
+    """拆分密钥形态：32 字节 = 标准裸 key（salt 用文件头前 16 字节）；
+    48 字节 = SQLCipher 4 "Raw Key with Explicit Salt"（前 32B key + 后 16B salt，
+    用于 cipher_plaintext_header_size 明文头模式）。返回 (enc_key, salt_or_None)。"""
+    if len(key) == 48:
+        return key[:32], key[32:]
+    return key, None
+
+
+def _verify_enc_key(enc_key: bytes, page1: bytes, salt: Optional[bytes] = None) -> bool:
+    """验证 enc_key 是否为 page1 的 SQLCipher 4 密钥。
+
+    - enc_key 为 32 字节裸 key：默认用文件头前 16 字节作 salt（标准形式）；
+    - enc_key 为 48 字节 key+salt：显式 salt 优先于文件头（明文头模式）；
+    - 也允许单独传 salt 参数覆盖（供提取逻辑按 96hex 拆分尝试）。
+    """
     if len(page1) < PAGE_SZ:
         return False
-    salt = page1[:16]
+    if len(enc_key) == 48 and salt is None:
+        enc_key, salt = enc_key[:32], enc_key[32:]
+    if salt is None:
+        salt = page1[:16]
+    elif len(salt) != 16:
+        return False
     mac_salt = bytes(b ^ 0x3A for b in salt)
     mac_key = _pbkdf2(enc_key, mac_salt, 2)
     hmac_data = page1[16: PAGE_SZ - RESERVE_SZ + 16]
@@ -124,10 +144,16 @@ def _sqlite_text_factory(data: bytes):
 def _decrypt_page(enc_key: bytes, page: bytes, pgno: int) -> bytes:
     iv = page[PAGE_SZ - RESERVE_SZ: PAGE_SZ - RESERVE_SZ + 16]
     if pgno == 1:
+        # 48 字节 key（key+salt）= cipher_plaintext_header_size 明文头模式：
+        # 页 1 前 16 字节是明文头（非加密 salt），加密数据从 offset 16 开始；
+        # 解密后拼接明文头 + 明文数据 + reserve。
+        if len(enc_key) == 48:
+            enc = page[16: PAGE_SZ - RESERVE_SZ]
+            return page[:16] + _aes_cbc_decrypt(enc_key[:32], iv, enc) + b"\x00" * RESERVE_SZ
         enc = page[16: PAGE_SZ - RESERVE_SZ]
         return b"SQLite format 3\x00" + _aes_cbc_decrypt(enc_key, iv, enc) + b"\x00" * RESERVE_SZ
     enc = page[: PAGE_SZ - RESERVE_SZ]
-    return _aes_cbc_decrypt(enc_key, iv, enc) + b"\x00" * RESERVE_SZ
+    return _aes_cbc_decrypt(enc_key[:32] if len(enc_key) == 48 else enc_key, iv, enc) + b"\x00" * RESERVE_SZ
 
 
 def _extract_text_from_blob(content: bytes) -> Optional[str]:
@@ -395,14 +421,25 @@ class WeChatDB:
                             if cand in tested or not self._probable_key(cand):
                                 continue
                             tested.add(cand)
-                            for rel, path, _ in self._db_files:
-                                if rel in keys:
-                                    continue
-                                with open(path, "rb") as f:
-                                    page1 = f.read(PAGE_SZ)
-                                if _verify_enc_key(cand, page1):
-                                    keys[rel] = cand
-                                    break
+                            # 96hex 形式：后 32 hex 是显式 salt（Raw Key with
+                            # Explicit Salt），与文件头 salt 都要尝试
+                            explicit = None
+                            if s + 96 <= len(run):
+                                explicit = bytes.fromhex(run[s + 64: s + 96])
+                            salt_choices = [None]
+                            if explicit:
+                                salt_choices.append(explicit)
+                            for salt_opt in salt_choices:
+                                for rel, path, _ in self._db_files:
+                                    if rel in keys:
+                                        continue
+                                    with open(path, "rb") as f:
+                                        page1 = f.read(PAGE_SZ)
+                                    if _verify_enc_key(cand, page1, salt=salt_opt):
+                                        # 显式 salt 通过 → 存 key+salt（明文头模式）；
+                                        # 文件头 salt 通过 → 存裸 key
+                                        keys[rel] = cand + (salt_opt or b"")
+                                        break
         finally:
             _k32.CloseHandle(h)
         return keys
@@ -636,7 +673,12 @@ class WeChatDB:
                         continue
                     pt = _decrypt_page(key, page, pgno)
                     if pgno == 1:
-                        if pt[:16] != b"SQLite format 3\x00":
+                        # 明文头模式（48B key）页 1 解密后保留明文头，
+                        # 头部 magic 可能不是标准 SQLite；用版本字节兜底校验。
+                        if len(key) == 48:
+                            if len(pt) < PAGE_SZ or pt[16:18] != b"\x01\x01":
+                                continue
+                        elif pt[:16] != b"SQLite format 3\x00":
                             continue
                     elif pt[0] not in (0, 2, 5, 10, 13):
                         continue
