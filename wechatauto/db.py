@@ -454,6 +454,66 @@ class WeChatDB:
     WAL_HEADER_SZ = 32   # WCDB WAL 文件头
     WAL_FRAME_SZ = 4120  # 帧头 24 字节(大端 pgno + 校验等) + 4096 加密页
 
+    def _auto_diagnose_key_failure(self, rel: str) -> None:
+        """密钥缺失报错时的自动诊断，向 stderr 输出三项最常见根因：
+        1) Python 位数（32 位 Python 读不了 64 位微信进程内存）；
+        2) 微信进程读取权限（管理员权限不匹配 → OpenProcess 失败 → 0 密钥）；
+        3) 多账号目录与所选账号对比（选错账号 → 密钥验证不过）。
+        """
+        print("[wechatauto] 密钥诊断: '%s' 无可用密钥" % rel, file=sys.stderr)
+        bits = 64 if sys.maxsize > 2**32 else 32
+        if bits != 64:
+            print("[wechatauto]  >> 当前 Python 是 %d 位，而微信 4.x 是 64 位进程。"
+                  "请改用 64 位 Python（python -c \"import struct; print(struct.calcsize('P')*8)\" 应输出 64）"
+                  % bits, file=sys.stderr)
+        import subprocess as _sp
+        try:
+            r = _sp.run(
+                ["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True,
+                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError:
+            return
+        pids = []
+        for line in r.stdout.strip().splitlines():
+            parts = line.strip('"').split('","')
+            if len(parts) >= 2 and parts[1].isdigit():
+                pids.append(int(parts[1]))
+        if not pids:
+            print("[wechatauto]  >> 未检测到 Weixin.exe 进程，请先登录微信并保持窗口打开",
+                  file=sys.stderr)
+            return
+        perms = []
+        for pid in pids:
+            h = _k32.OpenProcess(0x0010 | 0x0400, False, pid)
+            if not h:
+                err = ctypes.get_last_error()
+                perms.append((pid, False, err))
+            else:
+                _k32.CloseHandle(h)
+                perms.append((pid, True, 0))
+        blocked = [p for p, ok, err in perms if not ok]
+        if blocked:
+            print("[wechatauto]  >> 部分微信进程无法读取内存 (PID %s，错误码 %s)："
+                  "请用管理员身份运行 Python（若微信本身以管理员运行），"
+                  "或取消微信的\"以管理员身份运行\"后重新登录"
+                  % (", ".join(str(p) for p, _, _ in blocked),
+                     ", ".join(str(e) for _, _, e in blocked)),
+                  file=sys.stderr)
+        accounts = [
+            os.path.basename(d)
+            for d in glob.glob(os.path.join(self.db_dir, "wxid_*"))
+            if os.path.isdir(os.path.join(d, "db_storage"))
+        ]
+        if len(accounts) > 1:
+            print("[wechatauto]  >> 检测到多个微信账号目录: %s；当前自动选择: %s。"
+                  "若报错，请用 WeChatDB(account=\"当前登录账号\") 显式指定"
+                  % (", ".join(sorted(accounts)), self.account),
+                  file=sys.stderr)
+        print("[wechatauto] 密钥诊断完成，以上为自动检测结果。完整排查请运行 "
+              "python -m wechatauto.diagnose_keys", file=sys.stderr)
+
     def _open(self, rel: str) -> sqlite3.Connection:
         """打开解密(并合并 -wal 增量)后的只读库。
 
@@ -462,6 +522,7 @@ class WeChatDB:
         - 仅 WAL 追加了新帧 → 增量合并新帧（秒级）。
         """
         if rel not in self._keys:
+            self._auto_diagnose_key_failure(rel)
             raise RuntimeError(
                 "数据库无可用密钥: %s。请确认微信已登录且保持窗口打开；"
                 "若仍复现，运行 python -m wechatauto.diagnose_keys 并把完整输出发给维护者。"
