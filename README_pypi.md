@@ -18,7 +18,7 @@
 本项目复刻上游 wxauto 项目，目标是实现对当前微信 4.x Windows 客户端的自动化
 （读取消息、发送消息、媒体下载、朋友圈），非网页版，直接操作本机客户端。
 
-> 当前版本：1.1.5.1（测试版 / beta）
+> 当前版本：1.1.6
 >
 > **兼容范围**：Windows 10/11 ｜ Python 3.9+（已在 3.12 验证）｜ 微信 **4.1.12+**
 > （数据库读取路线对微信版本不敏感；坐标+OCR 发送路线依赖 4.1.12+ 自绘渲染
@@ -43,6 +43,12 @@
 ---
 
 ## 版本记录
+
+### v1.1.6（2026-08-20）
+
+- **缺密钥报错自动诊断**：`数据库无可用密钥` 报错前会自动检测三项最常见根因——Python 位数（32 位读不了 64 位微信内存）、逐个微信进程的 `OpenProcess`/`ReadProcessMemory` 读取权限、多账号目录与所选账号对比（提示用 `WeChatDB(account=...)` 显式指定），无需先手动运行 `diagnose_keys`。
+- **新增诊断工具**：`wechatauto/diagnose_keys.py`（微信登录后运行 `python -m wechatauto.diagnose_keys`）输出库版本、Python 位数、微信进程 PID 及逐个进程的读取权限检测、磁盘全部账号与所选账号对比、已缓存密钥、进程内存重新提取结果与密钥校验情况——报密钥提取问题时把输出完整发给维护者即可定位。
+- **跳过 `migrate\unspportmsg.db`**：该库是微信保留的「未支持消息」库，进程内存中无对应密钥、代码也从不会访问；此前它会让每次初始化都触发一次全进程内存扫描。
 
 ### v1.1.5.1（2026-08-18）— 测试版 / beta
 
@@ -638,7 +644,7 @@ quick_send_file(r'D:\资料\报告.pdf', '文件传输助手')
 
 Automate the **WeChat 4.x Windows desktop client** (not the web version): read messages, listen in real time, download media, export full history, read Moments (朋友圈), and send messages — by driving the local client directly.
 
-> **Current version:** 1.1.5.1 (beta) · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
+> **Current version:** 1.1.6 · Windows 10/11 · Python 3.9+ (verified on 3.12) · WeChat **4.1.12+**
 >
 > **Why this project exists:** the classic [wxauto](https://github.com/cluic/wxauto) relies on the UI Automation tree, which WeChat 4.x broke with self-drawn rendering (no accessibility nodes). wechatauto-replica is a drop-in-style replacement: messages are read through **local database decryption** (SQLCipher 4), and sending uses a **UIA + OCR hybrid** driver that auto-falls back between engines.
 
@@ -763,6 +769,11 @@ for feed in moments.get_moments(limit=10):
 - Performance: parallel export / first-scan, incremental memory-scan cache
 
 ## 📝 Changelog
+
+### v1.1.6 (2026-08-20)
+- **Auto-diagnosis on missing key**: `数据库无可用密钥` now runs a built-in check before raising — Python bitness (32-bit can't read 64-bit Weixin memory), per-PID `OpenProcess`/`ReadProcessMemory` permission, and multi-account mismatch (all `wxid_*` dirs vs. picked account, suggesting `WeChatDB(account=...)`). No need to run `diagnose_keys` first.
+- **New diagnostic tool**: `wechatauto/diagnose_keys.py` (`python -m wechatauto.diagnose_keys`, WeChat logged in) dumps lib version, Python bitness, Weixin PIDs with per-process read-permission checks, all accounts vs. picked account, cached keys, fresh in-memory extraction, and key verification — paste the output when reporting key-extraction failures.
+- **Skip `migrate\unspportmsg.db`**: WeChat's reserved "unsupported message" DB has no in-memory key and is never queried; it was forcing a full process-memory scan on every init.
 
 ### v1.1.5.1 (2026-08-18) — beta
 - **Fix real-time listening**: `WeChatDB.get_new_messages()` referenced an undefined `found` (NameError swallowed by `Listener._poll_once`), so **no** message callbacks ever fired — including first messages from contacts you had never chatted with.
