@@ -612,20 +612,35 @@ class WeChatGUI:
         校准采用「保守优先」策略：任一项检测失败即用模块默认比例，宁可
         不做调整也不产生错误的坐标。返回是否成功。
         """
+        def _run_with_timeout(fn, timeout=5):
+            result = [None]
+            def _target():
+                try:
+                    result[0] = fn()
+                except Exception:
+                    pass
+            t = threading.Thread(target=_target, daemon=True)
+            t.start()
+            t.join(timeout)
+            return result[0]
+
         try:
             self._update_render_rect()
             self.bring_to_front()
             time.sleep(0.8)
             self._update_render_rect()
             layout: Dict[str, object] = {'machine': _machine_id()}
-            # 1) 侧栏宽度：OCR「搜索」锚点
-            sb = self._detect_sidebar_ratio()
+            # 1) 侧栏宽度：OCR「搜索」锚点（限制 5s 超时）
+            sb = _run_with_timeout(self._detect_sidebar_ratio, timeout=5)
             layout['sidebar_ratio'] = float(sb) if sb else SIDEBAR_RATIO
-            # 2) 发送按钮：OCR「发送」（仅右下角检索区）
+            # 2) 发送按钮：OCR「发送」（仅右下角检索区，限制 5s 超时）
             try:
-                lines = self.ocr((int(self.render_w * 0.5),
-                                  int(self.render_h * 0.7),
-                                  self.render_w, self.render_h))
+                lines = _run_with_timeout(
+                    lambda: self.ocr((int(self.render_w * 0.5),
+                                      int(self.render_h * 0.7),
+                                      self.render_w, self.render_h)),
+                    timeout=5)
+                lines = lines or []
             except Exception:
                 lines = []
             send = None
