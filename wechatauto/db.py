@@ -418,6 +418,7 @@ class WeChatDB:
         keys_file: Optional[str] = None,
         workdir: Optional[str] = None,
         account: Optional[str] = None,
+        master_key: Optional[str] = None,
     ):
         self.db_dir = db_dir or auto_detect_db_dir()
         if not self.db_dir:
@@ -430,7 +431,9 @@ class WeChatDB:
         self.keys_file = keys_file or os.path.join(self.workdir, "keys.json")
         self._keys: Dict[str, bytes] = {}
         self._db_files = self._collect_db_files()
-        self._load_or_extract_keys()
+        self.master_key: Optional[str] = None
+        self.cfg_dword: Optional[int] = None
+        self._load_or_extract_keys(master_key=master_key)
 
     # ------------------------------------------------------------------
     # 账号与数据库文件
@@ -491,30 +494,57 @@ class WeChatDB:
     # ------------------------------------------------------------------
     # 密钥提取
     # ------------------------------------------------------------------
-    def _load_or_extract_keys(self) -> None:
-        if os.path.exists(self.keys_file):
-            try:
-                with open(self.keys_file, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                for rel, hexkey in saved.items():
-                    try:
-                        self._keys[rel] = bytes.fromhex(hexkey)
-                    except ValueError:
-                        pass
-            except (json.JSONDecodeError, OSError):
-                pass
-        missing = [
-            rel for rel, path, _ in self._db_files
-            if rel not in self._keys or not self._key_works(rel)
-        ]
-        if missing:
-            extracted = self.extract_keys()
-            self._keys.update(extracted)
+    KDF_ITER = 256000  # 主密钥→库密钥 PBKDF2 迭代(微信魔改 WCDB, 实测确认)
+
+    def _load_or_extract_keys(self, master_key: Optional[str] = None) -> None:
+        """加载/提取密钥, 四层优先级:
+
+        1. 显式 master_key(构造参数) → 主密钥派生;
+        2. cfg 自动提取(进程内存, 免手动注入);
+        3. 本地缓存 keys.json;
+        4. Config.Cipher 内存扫描(最终回退)。
+
+        派生/扫描结果均经 SQLCipher4 页1 HMAC 强校验, 零误报。
+        """
+        if master_key:
+            self._keys.update(self.derive_keys_from_master(master_key))
+            self.master_key = master_key
+            self.cfg_dword = None
             self._save_keys()
+        else:
+            auto = self.extract_master_key()
+            if auto:
+                master, cfg_dword, _ = auto
+                self.master_key = master
+                self.cfg_dword = cfg_dword
+                self._keys.update(self.derive_keys_from_master(master))
+                self._save_keys()
+            else:
+                self.master_key = None
+                self.cfg_dword = None
+                if os.path.exists(self.keys_file):
+                    try:
+                        with open(self.keys_file, "r", encoding="utf-8") as f:
+                            saved = json.load(f)
+                        for rel, hexkey in saved.items():
+                            try:
+                                self._keys[rel] = bytes.fromhex(hexkey)
+                            except ValueError:
+                                pass
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                missing = [
+                    rel for rel, path, _ in self._db_files
+                    if rel not in self._keys or not self._key_works(rel)
+                ]
+                if missing:
+                    extracted = self.extract_keys()
+                    self._keys.update(extracted)
+                    self._save_keys()
         still = [
             rel for rel, _, _ in self._db_files if not self._key_works(rel)
         ]
-        if still and missing:
+        if still:
             import sys as _sys
             print(
                 "[wechatauto] 警告: 以下库无可用密钥，无法解密: %s"
@@ -528,6 +558,45 @@ class WeChatDB:
                 file=_sys.stderr,
             )
         self.unkeyed = still
+
+    def derive_keys_from_master(self, master_hex: str) -> Dict[str, bytes]:
+        """主密钥派生逐库密钥: PBKDF2-HMAC-SHA512(主密钥, 库头salt, KDF_ITER)。
+
+        微信 4.x 为单一主密钥 + 每库随机 salt 派生独立库密钥(SQLCipher4
+        passphrase 语义)。仅返回通过页1 HMAC 校验的派生密钥。
+        """
+        try:
+            master = bytes.fromhex(master_hex)
+        except ValueError:
+            raise ValueError("主密钥必须为 64 位 hex 字符串")
+        if len(master) != 32:
+            raise ValueError("主密钥必须为 32 字节(64 位 hex)")
+        keys: Dict[str, bytes] = {}
+        for rel, path, _ in self._db_files:
+            try:
+                with open(path, "rb") as f:
+                    page1 = f.read(PAGE_SZ)
+            except OSError:
+                continue
+            if len(page1) < PAGE_SZ:
+                continue
+            derived = _pbkdf2(master, page1[:16], self.KDF_ITER)
+            if _verify_enc_key(derived, page1):
+                keys[rel] = derived
+        return keys
+
+    def extract_master_key(self) -> Optional[Tuple[str, int, str]]:
+        """从 Weixin.exe 进程 cfg 自动提取 (主密钥hex, cfgDword, wxId)。
+
+        遍历微信进程调 extract_master_key_from_cfg; 主密钥可离线派生全部库。
+        微信未运行或锚点漂移(版本变更)时返回 None, 由调用方回退。
+        """
+        pids = self._find_weixin_pids()
+        for pid in pids:
+            got = extract_master_key_from_cfg(pid)
+            if got:
+                return got
+        return None
 
     def _key_works(self, rel: str) -> bool:
         key = self._keys.get(rel)
