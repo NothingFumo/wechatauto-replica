@@ -195,6 +195,23 @@ def _extract_text_from_blob(content: bytes) -> Optional[str]:
     return None
 
 
+def _find_account_dirs(db_dir: str) -> List[str]:
+    """列出 db_dir 下所有含 db_storage 子目录的账号目录。
+
+    微信号目录不一定以 wxid_ 开头（如自定义微信号），这里只依赖
+    db_storage 子目录的存在性判断。
+    """
+    out = []
+    try:
+        for name in os.listdir(db_dir):
+            p = os.path.join(db_dir, name, "db_storage")
+            if os.path.isdir(p):
+                out.append(os.path.join(db_dir, name))
+    except OSError:
+        pass
+    return sorted(out)
+
+
 class WeChatDB:
     """微信 4.x 本地数据库读取器"""
 
@@ -223,7 +240,7 @@ class WeChatDB:
     # ------------------------------------------------------------------
     def _pick_account(self) -> str:
         candidates = []
-        for d in glob.glob(os.path.join(self.db_dir, "wxid_*")):
+        for d in _find_account_dirs(self.db_dir):
             if os.path.isdir(os.path.join(d, "db_storage")):
                 recent = max(
                     (
@@ -540,8 +557,7 @@ class WeChatDB:
                   file=sys.stderr)
         accounts = [
             os.path.basename(d)
-            for d in glob.glob(os.path.join(self.db_dir, "wxid_*"))
-            if os.path.isdir(os.path.join(d, "db_storage"))
+            for d in _find_account_dirs(self.db_dir)
         ]
         if len(accounts) > 1:
             print("[wechatauto]  >> 检测到多个微信账号目录: %s；当前自动选择: %s。"
@@ -1264,9 +1280,7 @@ def list_accounts(db_dir: Optional[str] = None) -> List[dict]:
     if not db_dir:
         return []
     out = []
-    for d in sorted(glob.glob(os.path.join(db_dir, "wxid_*"))):
-        if not os.path.isdir(os.path.join(d, "db_storage")):
-            continue
+    for d in _find_account_dirs(db_dir):
         recent = max(
             (
                 os.path.getmtime(os.path.join(root, f))
@@ -1484,11 +1498,12 @@ def _registry_data_dirs() -> List[str]:
 
 
 def _locate_account_root(root: Optional[str]) -> Optional[str]:
-    """在候选根目录下定位「包含 wxid_* 账号目录」的目录。
+    """在候选根目录下定位「包含账号目录」的目录。
 
+    账号目录以含 db_storage 子目录为准（微信号不一定以 wxid_ 开头）。
     兼容两种布局：
-      <root>/xwechat_files/<wxid>_xxxx/db_storage
-      <root>/<wxid>_xxxx/db_storage
+      <root>/xwechat_files/<account>/db_storage
+      <root>/<account>/db_storage
     返回的目录即 WeChatDB.db_dir（账号目录的父目录）。
     """
     if not root or not os.path.isdir(root):
@@ -1508,8 +1523,7 @@ def _locate_account_root(root: Optional[str]) -> Optional[str]:
         except OSError:
             continue
         if any(
-            d.startswith("wxid_")
-            and os.path.isdir(os.path.join(cand, d, "db_storage"))
+            os.path.isdir(os.path.join(cand, d, "db_storage"))
             for d in dirs
         ):
             return cand

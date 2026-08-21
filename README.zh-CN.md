@@ -42,6 +42,7 @@
 
 - **修复 OCR 挂起**：`ScreenOCR.recognize` 的 WinRT 异步调用现在用 `asyncio.wait_for(..., 8s)` 包住——`Windows.Media.Ocr` 异步永不完成（如中文系统环境）时，此前会让 `quick_send` 永久挂起；现在 8 秒超时后降级为空 OCR 结果。
 - **支持明文头（key+salt）微信构建的库解密**：密钥提取现在接受 SQLCipher 4 的 "Raw Key with Explicit Salt" 形式（`x'<96hex>'` = 32 字节 key + 16 字节显式 salt，配合 `cipher_plaintext_header_size` 使用）。48 字节密钥（32B key + 16B salt）按明文头布局验证与解密（页 1 保留其明文头）；32 字节密钥保持标准文件头 salt 路径。这解除了部分构建上因旧偏移指向类名表而非 Cipher 实例（如 4.1.12.26 环境）而无法解密库的问题。
+- **修复 `wxid_*` 硬编码**：账号发现不再假设目录以 `wxid_` 开头——`db_dir` 下任何含 `db_storage/` 子目录的子目录都会被识别。这支持自定义微信号（如用户手动修改、不含 `wxid_` 前缀的账号）。
 
 ### v1.1.6.1（2026-08-20）
 

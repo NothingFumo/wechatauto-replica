@@ -28,6 +28,7 @@ print("OS:", sys.platform)
 try:
     import wechatauto
     from wechatauto import WeChatDB
+    from wechatauto.db import _find_account_dirs
     print("lib version:", getattr(wechatauto, "__version__", "?"))
     import wechatauto.db as dbmod
     print("db.py:", dbmod.__file__)
@@ -102,7 +103,7 @@ try:
     print("auto_detect_db_dir:", d)
     if d and os.path.isdir(d):
         for x in os.listdir(d):
-            if x.startswith("wxid_"):
+            if os.path.isdir(os.path.join(d, x, "db_storage")):
                 print("  account dir:", x)
 except Exception as e:
     print("dir detect error:", repr(e))
@@ -129,11 +130,8 @@ try:
     print("missing:", missing)
     print("unkeyed:", db.unkeyed)
     # which account dirs exist vs which one was picked
-    import glob
     print("accounts on disk:", sorted(
-        os.path.basename(x) for x in glob.glob(
-            os.path.join(db.db_dir, "wxid_*"))
-        if os.path.isdir(os.path.join(x, "db_storage"))))
+        os.path.basename(x) for x in _find_account_dirs(db.db_dir)))
     print("picked account:  ", db.account)
 except Exception as e:
     print("init error:", repr(e))
