@@ -138,7 +138,7 @@ for feed in moments.get_moments(limit=10):
 
 ## 📝 Changelog
 
-### v1.1.6.2 (2026-08-21)
+### v1.1.6.3 (2026-08-21)
 - **Fix import hang**: `import wechatauto` no longer blocks permanently on systems where `uiautomation` / COM initialization hangs (e.g. WeChat or other Qt apps occupying COM). The `uiautomation` and `comtypes` imports are now deferred — loaded lazily on first UIA access, not at `import wechatauto` time.
 - **Fix OCR hang**: `ScreenOCR.recognize` now wraps the WinRT async call in `asyncio.wait_for(..., 8s)` — a hung `Windows.Media.Ocr` async (e.g. Chinese-locale systems) previously blocked `quick_send` forever; it now times out and degrades to empty OCR results.
 - **Fix first-run calibrate_layout hang**: `calibrate_layout` now runs each OCR detection step in a daemon thread with a 5-second timeout. Previously, if WinRT OCR hung on a first-run (no layout config), the entire `WeChatGUI.__init__` would block forever; now it times out and falls back to default layout ratios.

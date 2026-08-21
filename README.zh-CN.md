@@ -38,7 +38,7 @@
 
 ## 版本记录
 
-### v1.1.6.2（2026-08-21）
+### v1.1.6.3（2026-08-21）
 
 - **修复导入卡死**：`import wechatauto` 不再在部分系统上永久阻塞（如微信或其他 Qt 应用占用 COM 导致 `uiautomation` / COM 初始化挂起）。`uiautomation` 和 `comtypes` 现在延迟导入——首次访问 UIA 功能时才加载，不在 `import wechatauto` 时触发。
 - **修复 OCR 挂起**：`ScreenOCR.recognize` 的 WinRT 异步调用现在用 `asyncio.wait_for(..., 8s)` 包住——`Windows.Media.Ocr` 异步永不完成（如中文系统环境）时，此前会让 `quick_send` 永久挂起；现在 8 秒超时后降级为空 OCR 结果。

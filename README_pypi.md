@@ -44,11 +44,14 @@
 
 ## 版本记录
 
-### v1.1.6.2（2026-08-21）— 测试版 / beta
+### v1.1.6.3（2026-08-21）
 
+- **修复导入卡死**：`import wechatauto` 不再在部分系统上永久阻塞（如微信或其他 Qt 应用占用 COM 导致 `uiautomation` / COM 初始化挂起）。`uiautomation` 和 `comtypes` 现在延迟导入——首次访问 UIA 功能时才加载，不在 `import wechatauto` 时触发。
 - **修复 OCR 挂起**：`ScreenOCR.recognize` 现在用 `asyncio.wait_for(..., 8s)` 包裹 WinRT 异步调用——在中文等部分系统上 `Windows.Media.Ocr` 异步可能永不完成，此前会导致 `quick_send` 永久阻塞；现在会超时并退化为返回空 OCR 结果。
+- **修复首次校准卡死**：`calibrate_layout` 的每个 OCR 检测步骤现在用守护线程 + 5 秒超时。此前首次运行（无布局配置文件）时 WinRT OCR 若挂起，整个 `WeChatGUI.__init__` 会永久阻塞；现在超时后回退使用默认布局比例。
 - **支持明文头（key+salt）库解密**：密钥提取现支持 SQLCipher 4「Raw Key with Explicit Salt」形式（`x'<96hex>'` = 32B key + 16B 显式 salt，配合 `cipher_plaintext_header_size`）。48 字节 key（32B key + 16B salt）按明文头布局验证/解密（第 1 页保留明文头）；32 字节 key 保持标准文件头 salt 路径。可解锁部分新版本微信（如 4.1.12.26 环境）下旧偏移指向类名表而非 Cipher 实例导致的解密失败。
 - **修复 `wxid_*` 硬编码**：账号发现不再假设目录以 `wxid_` 开头——只要 `db_dir` 下某子目录含 `db_storage/` 子目录即识别为账号，支持自定义微信号（用户自选的非 `wxid_` 前缀用户名）。
+- **全局消息监听**：`WeChat.AddListenAll(callback)` 现在一次监听所有会话（好友、群聊、文件传输助手等），支持自动发现新会话。`WeChat.RemoveListenAll()` 停止全局监听。回调签名为 `(Message, Chat)`，其中 `Chat.who` 为会话原始 username。
 
 ### v1.1.6.1（2026-08-20）
 
