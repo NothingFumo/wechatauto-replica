@@ -1348,6 +1348,27 @@ class Listener:
         except (KeyError, ValueError):
             pass
 
+    def add_all(self, callback: callable, discover: bool = True) -> None:
+        """注册全局回调：监听所有已知会话的新消息。
+
+        Args:
+            callback: 回调函数，签名 callback(msg: dict, listener)。
+                msg 包含 local_id / type / sender_id / create_time /
+                content / sort_seq / username（会话原始 username）字段。
+            discover: 为 True 时，轮询过程中自动发现新出现的会话并注册
+                回调（无需重复调用 add_all）。默认 True。
+
+        与 add_listener 的区别：add_listener 只监听指定的单个会话，
+        add_all 监听所有会话（含后续新建的群聊等）。
+        """
+        self._all_callback = callback
+        self._discover_new = discover
+        sessions = self.db.get_sessions(limit=500)
+        for s in sessions:
+            username = s["username"]
+            if username not in self._callbacks:
+                self.add_listener(username, callback)
+
     @property
     def watermark(self) -> Dict[str, int]:
         return dict(self._watermark)
@@ -1380,6 +1401,16 @@ class Listener:
             self._stop.wait(self.interval)
 
     def _poll_once(self) -> None:
+        # 自动发现新会话（add_all 的 discover 模式）
+        if getattr(self, '_discover_new', False) and getattr(self, '_all_callback', None):
+            try:
+                sessions = self.db.get_sessions(limit=500)
+                for s in sessions:
+                    username = s["username"]
+                    if username not in self._callbacks:
+                        self.add_listener(username, self._all_callback)
+            except Exception:
+                pass
         for user, callbacks in list(self._callbacks.items()):
             since = self._watermark.get(user, 0)
             msgs = self.db.get_new_messages(user, since_seq=since)
@@ -1403,6 +1434,7 @@ class Listener:
                 t.start()
         cbs = tuple(self._callbacks.get(user, ()))
         for m in msgs:
+            m["username"] = user
             q.put((m, cbs))
 
     def _worker_run(self, user: str) -> None:

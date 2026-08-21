@@ -139,9 +139,11 @@ for feed in moments.get_moments(limit=10):
 ## 📝 Changelog
 
 ### v1.1.6.2 (2026-08-21)
+- **Fix import hang**: `import wechatauto` no longer blocks permanently on systems where `uiautomation` / COM initialization hangs (e.g. WeChat or other Qt apps occupying COM). The `uiautomation` and `comtypes` imports are now deferred — loaded lazily on first UIA access, not at `import wechatauto` time.
 - **Fix OCR hang**: `ScreenOCR.recognize` now wraps the WinRT async call in `asyncio.wait_for(..., 8s)` — a hung `Windows.Media.Ocr` async (e.g. Chinese-locale systems) previously blocked `quick_send` forever; it now times out and degrades to empty OCR results.
 - **Support WeChat builds with plaintext-header (key+salt) DBs**: key extraction now accepts SQLCipher 4 "Raw Key with Explicit Salt" form (`x'<96hex>'` = 32B key + 16B explicit salt, used with `cipher_plaintext_header_size`). A 48-byte key (32B key + 16B salt) is verified and decrypted in plaintext-header layout (page-1 keeps its plaintext header); a 32-byte key keeps the standard file-header-salt path. This unblocks DB decryption on builds where the old offsets point at the class-name table instead of the Cipher instance (e.g. a 4.1.12.26 environment).
 - **Fix `wxid_*` hardcoding**: account discovery no longer assumes directories start with `wxid_` — any subdirectory of `db_dir` containing `db_storage/` is recognized. This supports custom WeChat IDs (e.g. user-chosen usernames that don't use the `wxid_` prefix).
+- **Listen to all messages**: `WeChat.AddListenAll(callback)` now monitors ALL sessions (friends, groups, file transfer, etc.) with a single call, including auto-discovery of new sessions. `WeChat.RemoveListenAll()` stops it. The callback receives `(Message, Chat)` where `Chat.who` is the session username.
 
 ### v1.1.6.1 (2026-08-20)
 - **PyPI description fix**: v1.1.6 was uploaded without the synced `README_pypi.md` (description still showed 1.1.5.1); this patch restores the full v1.1.6 changelog and bumps the version marker.

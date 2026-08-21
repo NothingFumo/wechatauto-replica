@@ -114,6 +114,14 @@ class _DBMessageParent:
         self.msgbox = None
 
 
+class _AllMessageChat:
+    """AddListenAll 使用的轻量 Chat 占位（仅含 .who，不触发 GUI 初始化）。"""
+
+    def __init__(self, username: str):
+        self.who = username
+        self._wxid = username
+
+
 def _extract_group_sender(content) -> str:
     """群消息内容形如 ``wxid_xxx:\\n正文``，提取发送者 wxid。"""
     if isinstance(content, bytes):
@@ -489,6 +497,8 @@ class WeChat(Chat, Listener):
         self._listener_is_listening = False
         self._listener_stop_event = threading.Event()
         self._current_chat: Optional['Chat'] = None
+        self._listen_all_active = False
+        self._listen_all_callback: Optional[Callable] = None
 
         if start_listener:
             self._listener_start()
@@ -566,6 +576,64 @@ class WeChat(Chat, Listener):
             self._listener.add_listener(chat._wxid, wrapper)
         return chat
 
+    def AddListenAll(
+            self,
+            callback: Callable[['Message', 'Chat'], None],
+            discover: bool = True,
+        ) -> WxResponse:
+        """监听所有会话的新消息（包括好友、群聊、文件传输助手等）。
+
+        Args:
+            callback: 回调函数，参数为 (Message 对象, Chat-like 对象)。
+                Chat-like 对象的 .who 属性为会话原始 username。
+            discover: 为 True 时自动发现新出现的会话（如新群聊）并注册
+                回调，无需重复调用。默认 True。
+
+        Returns:
+            WxResponse
+
+        示例::
+
+            wx = WeChat()
+            def on_all(msg, chat):
+                print(f'[{chat.who}] {msg.content}')
+            wx.AddListenAll(on_all)
+            wx.StartListening()
+        """
+        if not self._listener_is_listening:
+            wxlog.debug('检测到未开启监听器，开启监听器')
+            self._listener_start()
+        if getattr(self, '_listen_all_active', False):
+            return WxResponse.failure('已开启全局监听')
+        self_wxid = self._db.get_self_info()['username']
+
+        def _wrap(row: dict, listener) -> None:
+            try:
+                username = row.get('username', '')
+                fake_chat = _AllMessageChat(username)
+                msg = _db_row_to_message(row, fake_chat, self_wxid)
+                callback(msg, fake_chat)
+            except Exception:
+                import traceback
+                wxlog.debug(f'全局监听回调发生错误：{traceback.format_exc()}')
+
+        self._listen_all_callback = callback
+        self._listen_all_active = True
+        if self._listener is not None:
+            self._listener.add_all(_wrap, discover=discover)
+        return WxResponse.success('已开启全局监听')
+
+    def RemoveListenAll(self) -> WxResponse:
+        """停止全局监听。"""
+        if not getattr(self, '_listen_all_active', False):
+            return WxResponse.failure('未开启全局监听')
+        self._listen_all_active = False
+        self._listen_all_callback = None
+        if self._listener is not None:
+            self._listener._discover_new = False
+            self._listener._all_callback = None
+        return WxResponse.success('已停止全局监听')
+
     def StartListening(self) -> None:
         """启动监听。"""
         self._listener_start()
@@ -580,6 +648,8 @@ class WeChat(Chat, Listener):
         if remove:
             self.listen.clear()
             self._listen_wrappers.clear()
+            self._listen_all_active = False
+            self._listen_all_callback = None
 
     @uilock
     def RemoveListenChat(
